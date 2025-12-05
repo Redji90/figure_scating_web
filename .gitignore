@@ -1,0 +1,29 @@
+# Временные файлы
+*.tmp
+*.log
+*.swp
+*~
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Node modules (если будут добавлены)
+node_modules/
+package-lock.json
+
+# Браузерные данные
+*.localstorage
+*.localstorage-journal
+
+# Служебные файлы
+.env
+.env.local
+

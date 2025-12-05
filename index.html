@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Аналитика фигурного катания</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="database.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⛸️ Аналитика фигурного катания</h1>
+            <p class="subtitle">Анализ результатов из PDF файлов и база данных фигуристов</p>
+        </header>
+
+        <div class="main-content">
+            <!-- Титульная страница -->
+            <section class="card home-page" id="homePage">
+                <div class="home-content">
+                    <h2>Добро пожаловать!</h2>
+                    <p class="home-description">
+                        Система для анализа результатов соревнований по фигурному катанию.
+                        Загружайте PDF файлы, парсите результаты и анализируйте данные фигуристов.
+                    </p>
+                    
+                    <div class="home-buttons">
+                        <button class="home-btn" onclick="showPage('uploadPage')">
+                            <div class="home-btn-icon">📄</div>
+                            <div class="home-btn-content">
+                                <div class="home-btn-title">Загрузка PDF</div>
+                                <div class="home-btn-desc">Загрузите и проанализируйте PDF файлы с результатами соревнований</div>
+                            </div>
+                        </button>
+                        
+                        <button class="home-btn" onclick="showPage('searchPage')">
+                            <div class="home-btn-icon">🔍</div>
+                            <div class="home-btn-content">
+                                <div class="home-btn-title">Поиск фигуристов</div>
+                                <div class="home-btn-desc">Найдите фигуриста в базе данных и просмотрите его статистику</div>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Страница загрузки PDF -->
+            <section class="card page-section" id="uploadPage" style="display: none;">
+                <div class="page-header">
+                    <button class="back-btn" onclick="showPage('homePage')">← Назад</button>
+                    <h2>Загрузка и анализ PDF</h2>
+                </div>
+
+                <!-- Загрузка PDF -->
+                <div class="card upload-section">
+                    <h3>Загрузить PDF файл</h3>
+                    <div class="upload-area" id="uploadArea">
+                        <input type="file" id="pdfInput" accept=".pdf" hidden>
+                        <div class="upload-content">
+                            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="17 8 12 3 7 8"></polyline>
+                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                            </svg>
+                            <p>Перетащите PDF файл сюда или <span class="link" id="browseLink">выберите файл</span></p>
+                            <p class="upload-hint">Поддерживаются файлы с результатами соревнований</p>
+                        </div>
+                    </div>
+                    <div id="fileInfo" class="file-info" style="display: none;">
+                        <span id="fileName"></span>
+                        <button class="btn btn-danger btn-small" id="clearFile">Очистить</button>
+                    </div>
+                </div>
+
+                <!-- Настройки парсинга -->
+                <div class="card settings-section">
+                    <h3>Настройки анализа</h3>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="autoParse" checked>
+                            Автоматический анализ после загрузки
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label for="competitionName">Название соревнования:</label>
+                        <input type="text" id="competitionName" placeholder="Введите название соревнования">
+                    </div>
+                    <div class="form-group">
+                        <button id="parseBtn" class="btn btn-primary" disabled>Анализировать PDF</button>
+                        <button id="showDebugBtn" class="btn btn-secondary" style="margin-left: 10px;">Показать отладку</button>
+                    </div>
+                </div>
+
+                <!-- Результаты анализа -->
+                <section class="card results-section" id="resultsSection" style="display: none;">
+                    <div class="section-header">
+                        <h3>Результаты анализа</h3>
+                        <div class="action-buttons">
+                            <button id="saveResultsBtn" class="btn btn-secondary">Сохранить в БД</button>
+                            <button id="exportBtn" class="btn btn-secondary">Экспорт JSON</button>
+                            <button id="importBtn" class="btn btn-secondary">Импорт JSON</button>
+                            <button id="exportAllBtn" class="btn btn-secondary">Экспорт всей БД</button>
+                        </div>
+                    </div>
+                    <div id="resultsContent"></div>
+                </section>
+
+                <!-- Статистика -->
+                <section class="card stats-section" id="statsSection" style="display: none;">
+                    <h3>Статистика</h3>
+                    <div class="stats-grid" id="statsGrid"></div>
+                </section>
+
+                <!-- Отладочная информация -->
+                <section class="card debug-section" id="debugSection" style="display: none;">
+                    <div class="section-header">
+                        <h3>Отладочная информация</h3>
+                        <button id="toggleDebugBtn" class="btn btn-secondary btn-small">Скрыть</button>
+                    </div>
+                    <div id="debugInfo" class="debug-info">
+                        <p>Отладочная информация появится после загрузки PDF</p>
+                    </div>
+                </section>
+            </section>
+
+            <!-- Страница поиска фигуристов -->
+            <section class="card page-section" id="searchPage" style="display: none;">
+                <div class="page-header">
+                    <button class="back-btn" onclick="showPage('homePage')">← Назад</button>
+                    <h2>Поиск фигуристов</h2>
+                </div>
+
+                <!-- Поиск -->
+                <div class="card search-section">
+                    <h3>Поиск фигуристов</h3>
+                    <div class="search-container">
+                        <input type="text" id="skaterSearch" class="search-input" placeholder="Введите имя или фамилию (минимум 3 символа)...">
+                        <div id="searchResults" class="search-results"></div>
+                    </div>
+                    <div id="skaterInfo" class="skater-info-section" style="display: none;"></div>
+                </div>
+
+                <!-- Сохранённые результаты -->
+                <section class="card saved-section">
+                    <div class="section-header">
+                        <h3>Сохранённые результаты</h3>
+                        <button id="clearAllBtn" class="btn btn-danger btn-small">Очистить всё</button>
+                    </div>
+                    <div id="savedResults" class="saved-results-list">
+                        <p class="empty-message">Нет сохранённых результатов</p>
+                    </div>
+                </section>
+            </section>
+        </div>
+    </div>
+
+    <script>
+        // Инициализация PDF.js
+        if (typeof pdfjsLib !== 'undefined') {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+    </script>
+    <script src="script.js"></script>
+    <script>
+        // Навигация между страницами
+        function showPage(pageId) {
+            // Скрываем все страницы
+            document.querySelectorAll('.page-section, .home-page').forEach(page => {
+                page.style.display = 'none';
+            });
+            
+            // Показываем выбранную страницу
+            const targetPage = document.getElementById(pageId);
+            if (targetPage) {
+                targetPage.style.display = 'block';
+                // Прокручиваем вверх страницы
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+                
+                // Загружаем данные при переходе на страницу поиска
+                if (pageId === 'searchPage') {
+                    if (typeof loadSavedResults === 'function') {
+                        loadSavedResults();
+                    }
+                    if (typeof loadCompetitionsFromDB === 'function') {
+                        loadCompetitionsFromDB();
+                    }
+                }
+            }
+        }
+        
+        // Показываем титульную страницу при загрузке
+        document.addEventListener('DOMContentLoaded', () => {
+            showPage('homePage');
+        });
+        
+        // Делаем функцию доступной глобально
+        window.showPage = showPage;
+    </script>
+</body>
+</html>
