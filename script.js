@@ -99,6 +99,12 @@ function initializeEventListeners() {
         });
     }
     
+    // Загрузка списка соревнований ISU
+    const loadIsuCompetitionsBtn = document.getElementById('loadIsuCompetitionsBtn');
+    if (loadIsuCompetitionsBtn) {
+        loadIsuCompetitionsBtn.addEventListener('click', loadIsuCompetitions);
+    }
+    
     // Сохранение и экспорт
     saveResultsBtn.addEventListener('click', saveCurrentResults);
     exportBtn.addEventListener('click', exportToJSON);
@@ -3873,10 +3879,500 @@ async function loadIsuResults() {
     }
 }
 
-// Делаем функции сравнения доступными глобально
+// Функция для загрузки списка соревнований ISU сезона 2025/2026
+async function loadIsuCompetitions() {
+    const loadBtn = document.getElementById('loadIsuCompetitionsBtn');
+    const statusSpan = document.getElementById('loadingStatus');
+    const competitionsList = document.getElementById('isuCompetitionsList');
+    
+    if (!loadBtn || !statusSpan || !competitionsList) {
+        console.error('Элементы не найдены:', { loadBtn: !!loadBtn, statusSpan: !!statusSpan, competitionsList: !!competitionsList });
+        return;
+    }
+    
+    console.log('Загрузка списка соревнований ISU...');
+    
+    try {
+        loadBtn.disabled = true;
+        statusSpan.textContent = 'Загрузка...';
+        competitionsList.innerHTML = '<div style="color: #666;">Загрузка списка соревнований с сайта ISU...</div>';
+        
+        // URL страницы со списком соревнований сезона 2025/2026
+        const seasonUrl = 'https://www.isuresults.com/results/season2526/';
+        
+        // Список альтернативных CORS proxy
+        const proxies = [
+            `https://api.allorigins.win/get?url=${encodeURIComponent(seasonUrl)}`,
+            `https://corsproxy.io/?${encodeURIComponent(seasonUrl)}`,
+            `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(seasonUrl)}`
+        ];
+        
+        let data = null;
+        let lastError = null;
+        
+        // Пробуем каждый proxy по очереди
+        for (const proxyUrl of proxies) {
+            try {
+                const response = await fetch(proxyUrl, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                data = await response.json();
+                
+                // Проверяем формат ответа (разные прокси возвращают разные форматы)
+                if (data.contents) {
+                    break; // Успешно получили данные
+                } else if (data.body || data.data) {
+                    data = { contents: data.body || data.data };
+                    break;
+                } else if (typeof data === 'string') {
+                    data = { contents: data };
+                    break;
+                }
+            } catch (error) {
+                lastError = error;
+                console.warn('Прокси не сработал, пробуем следующий:', error.message);
+                continue;
+            }
+        }
+        
+        // Если все прокси не сработали, используем fallback
+        if (!data || !data.contents) {
+            console.warn('Не удалось загрузить через прокси, используем fallback список');
+            throw new Error('Не удалось загрузить страницу через прокси. Используется резервный список соревнований.');
+        }
+        
+        // Парсим HTML
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(data.contents, 'text/html');
+        
+        // Ищем все ссылки на соревнования
+        const competitions = [];
+        const processedUrls = new Set();
+        
+        // Ищем все ссылки, которые ведут на подстраницы соревнований
+        const links = doc.querySelectorAll('a[href]');
+        
+        links.forEach(link => {
+            const href = link.getAttribute('href');
+            if (!href) return;
+            
+            // Пропускаем служебные ссылки
+            if (href.includes('javascript:') || href.includes('mailto:') || href.includes('#') || 
+                href.includes('index.htm') || href.includes('isu-skating.com')) {
+                return;
+            }
+            
+            // Ищем ссылки на соревнования (обычно это относительные ссылки на папки)
+            // Например: jgpfra2025/, gpfin2025/, и т.д.
+            let fullUrl = '';
+            if (href.startsWith('http://') || href.startsWith('https://')) {
+                fullUrl = href;
+            } else if (href.startsWith('/')) {
+                fullUrl = 'https://www.isuresults.com' + href;
+            } else {
+                // Относительная ссылка
+                fullUrl = seasonUrl + href;
+            }
+            
+            // Проверяем, что это ссылка на соревнование
+            // Соревнования обычно имеют формат: jgpfra2025/, gpfin2025/, и т.д.
+            // Или просто папки в season2526/
+            const isCompetitionLink = fullUrl.includes('season2526/') && 
+                                     !fullUrl.endsWith('.htm') && 
+                                     !fullUrl.endsWith('.pdf') &&
+                                     !fullUrl.endsWith('.html') &&
+                                     (fullUrl.endsWith('/') || href.match(/^[a-z]+\d{4}\//i) || href.match(/^[a-z]+\d{4}$/i));
+            
+            if (isCompetitionLink) {
+                // Нормализуем URL - добавляем trailing slash если его нет
+                const normalizedUrl = fullUrl.endsWith('/') ? fullUrl : fullUrl + '/';
+                
+                if (!processedUrls.has(normalizedUrl)) {
+                    processedUrls.add(normalizedUrl);
+                    
+                    // Получаем название соревнования из текста ссылки или родительского элемента
+                    let name = link.textContent.trim();
+                    if (!name || name.length < 3) {
+                        // Пытаемся найти название в соседних элементах
+                        const parent = link.parentElement;
+                        if (parent) {
+                            const text = parent.textContent.trim();
+                            if (text.length > name.length) {
+                                name = text.substring(0, 100); // Ограничиваем длину
+                            }
+                        }
+                    }
+                    
+                    // Извлекаем код соревнования из URL
+                    const urlParts = normalizedUrl.split('/');
+                    const eventCode = urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2];
+                    
+                    // Определяем тип соревнования по коду
+                    let category = 'Соревнование';
+                    let description = `Соревнование ISU сезона 2025/2026`;
+                    
+                    if (eventCode) {
+                        if (eventCode.startsWith('jgp')) {
+                            category = 'Junior Grand Prix';
+                            description = 'Юниорский Гран-при ISU';
+                        } else if (eventCode.startsWith('gp')) {
+                            category = 'Grand Prix';
+                            description = 'Гран-при ISU';
+                        } else if (eventCode.startsWith('wc')) {
+                            category = 'World Championships';
+                            description = 'Чемпионат мира ISU';
+                        } else if (eventCode.startsWith('ec')) {
+                            category = 'European Championships';
+                            description = 'Чемпионат Европы';
+                        } else if (eventCode.startsWith('4cc')) {
+                            category = 'Four Continents';
+                            description = 'Чемпионат четырех континентов';
+                        }
+                    }
+                    
+                    if (name && name.length > 0 && eventCode) {
+                        competitions.push({
+                            name: name || eventCode.toUpperCase(),
+                            url: normalizedUrl,
+                            eventCode: eventCode,
+                            category: category,
+                            description: description
+                        });
+                    }
+                }
+            }
+        });
+        
+        // Если не нашли через ссылки, пробуем найти через таблицы
+        if (competitions.length === 0) {
+            const tables = doc.querySelectorAll('table');
+            tables.forEach(table => {
+                const rows = table.querySelectorAll('tr');
+                rows.forEach(row => {
+                    const cells = row.querySelectorAll('td');
+                    cells.forEach(cell => {
+                        const link = cell.querySelector('a[href]');
+                        if (link) {
+                            const href = link.getAttribute('href');
+                            if (href && (href.includes('season2526') || href.match(/^[a-z]+\d{4}\//))) {
+                                let fullUrl = '';
+                                if (href.startsWith('http://') || href.startsWith('https://')) {
+                                    fullUrl = href;
+                                } else if (href.startsWith('/')) {
+                                    fullUrl = 'https://www.isuresults.com' + href;
+                                } else {
+                                    fullUrl = seasonUrl + href;
+                                }
+                                
+                                const normalizedUrl = fullUrl.endsWith('/') ? fullUrl.slice(0, -1) : fullUrl;
+                                
+                                if (!processedUrls.has(normalizedUrl)) {
+                                    processedUrls.add(normalizedUrl);
+                                    
+                                    let name = link.textContent.trim() || cell.textContent.trim();
+                                    const urlParts = normalizedUrl.split('/');
+                                    const eventCode = urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2];
+                                    
+                                    // Определяем тип соревнования по коду
+                                    let category = 'Соревнование';
+                                    let description = `Соревнование ISU сезона 2025/2026`;
+                                    
+                                    if (eventCode) {
+                                        if (eventCode.startsWith('jgp')) {
+                                            category = 'Junior Grand Prix';
+                                            description = 'Юниорский Гран-при ISU';
+                                        } else if (eventCode.startsWith('gp')) {
+                                            category = 'Grand Prix';
+                                            description = 'Гран-при ISU';
+                                        } else if (eventCode.startsWith('wc')) {
+                                            category = 'World Championships';
+                                            description = 'Чемпионат мира ISU';
+                                        }
+                                    }
+                                    
+                                    if (name && name.length > 0 && eventCode) {
+                                        competitions.push({
+                                            name: name || eventCode.toUpperCase(),
+                                            url: normalizedUrl,
+                                            eventCode: eventCode,
+                                            category: category,
+                                            description: description
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+        }
+        
+        // Если все еще не нашли, используем известные соревнования как fallback
+        if (competitions.length === 0) {
+            console.log('Не удалось найти соревнования через парсинг, используем fallback список');
+            const knownCompetitions = [
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Men',
+                url: 'https://results.isu.org/events/gp2025/gpsmen.htm',
+                description: 'Гран-при по фигурному катанию - Мужчины'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Women',
+                url: 'https://results.isu.org/events/gp2025/gpswomen.htm',
+                description: 'Гран-при по фигурному катанию - Женщины'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Pairs',
+                url: 'https://results.isu.org/events/gp2025/gpspairs.htm',
+                description: 'Гран-при по фигурному катанию - Парное катание'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Ice Dance',
+                url: 'https://results.isu.org/events/gp2025/gpsdance.htm',
+                description: 'Гран-при по фигурному катанию - Танцы на льду'
+            },
+            {
+                name: 'Finlandia Trophy 2025',
+                category: 'Protocol',
+                url: 'https://results.isu.org/results/season2526/gpfin2025/gpfin2025_protocol.pdf',
+                description: 'Протокол соревнования Finlandia Trophy 2025'
+            },
+            {
+                name: 'ISU Junior Grand Prix 2025/2026',
+                category: 'Pairs',
+                url: 'https://results.isu.org/events/jgp2025/jgpspairs.htm',
+                description: 'Юниорский Гран-при - Парное катание'
+            },
+            {
+                name: 'ISU World Championships 2025',
+                category: 'Event Info',
+                url: 'https://www.isu.org/events/isu-world-championships-2025/',
+                description: 'Чемпионат мира по фигурному катанию 2025'
+            },
+            {
+                name: 'ISU World Standings 2025/2026',
+                category: 'Men',
+                url: 'https://results.isu.org/ws/ws/wsmen.htm',
+                description: 'Мировой рейтинг - Мужчины'
+            },
+            {
+                name: 'ISU World Standings 2025/2026',
+                category: 'Women',
+                url: 'https://results.isu.org/ws/ws/wswomen.htm',
+                description: 'Мировой рейтинг - Женщины'
+            },
+            {
+                name: 'ISU World Standings 2025/2026',
+                category: 'Pairs',
+                url: 'https://results.isu.org/ws/ws/wspairs.htm',
+                description: 'Мировой рейтинг - Парное катание'
+            },
+            {
+                name: 'ISU World Standings 2025/2026',
+                category: 'Ice Dance',
+                url: 'https://results.isu.org/ws/ws/wsdance.htm',
+                description: 'Мировой рейтинг - Танцы на льду'
+            },
+            {
+                name: 'ISU Junior World Standings 2025/2026',
+                category: 'Men',
+                url: 'https://results.isu.org/ws/ws/wsjuniormen.htm',
+                description: 'Мировой рейтинг юниоров - Мужчины'
+            },
+            {
+                name: 'ISU Junior World Standings 2025/2026',
+                category: 'Women',
+                url: 'https://results.isu.org/ws/ws/wsjuniorwomen.htm',
+                description: 'Мировой рейтинг юниоров - Женщины'
+            },
+            {
+                name: 'ISU Junior World Standings 2025/2026',
+                category: 'Pairs',
+                url: 'https://results.isu.org/ws/ws/wsjuniorpairs.htm',
+                description: 'Мировой рейтинг юниоров - Парное катание'
+            },
+            {
+                name: 'ISU Junior World Standings 2025/2026',
+                category: 'Ice Dance',
+                url: 'https://results.isu.org/ws/ws/wsjuniordance.htm',
+                description: 'Мировой рейтинг юниоров - Танцы на льду'
+            }
+            ];
+            competitions.push(...knownCompetitions);
+        }
+        
+        // Отображаем список соревнований
+        displayCompetitionsList(competitions, competitionsList, statusSpan);
+        statusSpan.textContent = '✓ Загружено ' + competitions.length + ' соревнований';
+        statusSpan.style.color = '#28a745';
+        
+    } catch (error) {
+        console.error('Ошибка загрузки списка соревнований:', error);
+        console.error('Стек ошибки:', error.stack);
+        
+        // Используем fallback список при любой ошибке
+        console.log('Используем fallback список соревнований');
+        
+        try {
+            // Используем известные соревнования как fallback
+            const fallbackCompetitions = [
+            {
+                name: 'ISU Junior Grand Prix - Riga 2025',
+                category: 'Junior Grand Prix',
+                url: 'https://www.isuresults.com/results/season2526/jgpriga2025/',
+                eventCode: 'jgpriga2025',
+                description: 'Юниорский Гран-при ISU - Рига 2025'
+            },
+            {
+                name: 'ISU Grand Prix - Finlandia Trophy 2025',
+                category: 'Grand Prix',
+                url: 'https://www.isuresults.com/results/season2526/gpfin2025/',
+                eventCode: 'gpfin2025',
+                description: 'Гран-при ISU - Finlandia Trophy 2025'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Grand Prix',
+                url: 'https://results.isu.org/events/gp2025/gpsmen.htm',
+                eventCode: 'gp2025',
+                description: 'Гран-при по фигурному катанию - Мужчины'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Grand Prix',
+                url: 'https://results.isu.org/events/gp2025/gpswomen.htm',
+                eventCode: 'gp2025',
+                description: 'Гран-при по фигурному катанию - Женщины'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Grand Prix',
+                url: 'https://results.isu.org/events/gp2025/gpspairs.htm',
+                eventCode: 'gp2025',
+                description: 'Гран-при по фигурному катанию - Парное катание'
+            },
+            {
+                name: 'ISU Grand Prix of Figure Skating 2025/2026',
+                category: 'Grand Prix',
+                url: 'https://results.isu.org/events/gp2025/gpsdance.htm',
+                eventCode: 'gp2025',
+                description: 'Гран-при по фигурному катанию - Танцы на льду'
+            },
+            {
+                name: 'ISU Junior Grand Prix 2025/2026',
+                category: 'Junior Grand Prix',
+                url: 'https://results.isu.org/events/jgp2025/jgpspairs.htm',
+                eventCode: 'jgp2025',
+                description: 'Юниорский Гран-при - Парное катание'
+            },
+            {
+                name: 'ISU World Championships 2025',
+                category: 'World Championships',
+                url: 'https://www.isu.org/events/isu-world-championships-2025/',
+                eventCode: 'wc2025',
+                description: 'Чемпионат мира по фигурному катанию 2025'
+            }
+        ];
+        
+            // Используем fallback список
+            const competitions = fallbackCompetitions;
+            
+            // Отображаем fallback список
+            displayCompetitionsList(competitions, competitionsList, statusSpan);
+            statusSpan.textContent = '⚠ Использован резервный список (прокси недоступен)';
+            statusSpan.style.color = '#ffc107';
+        } catch (fallbackError) {
+            console.error('Ошибка при отображении fallback списка:', fallbackError);
+            competitionsList.innerHTML = '<div style="color: #dc3545; padding: 15px;">Ошибка: ' + fallbackError.message + '</div>';
+            statusSpan.textContent = '✗ Критическая ошибка';
+            statusSpan.style.color = '#dc3545';
+        }
+    } finally {
+        loadBtn.disabled = false;
+    }
+}
+
+// Вспомогательная функция для отображения списка соревнований
+function displayCompetitionsList(competitions, competitionsList, statusSpan) {
+    // Сортируем соревнования по категориям
+    competitions.sort((a, b) => {
+        if (a.category !== b.category) {
+            return a.category.localeCompare(b.category);
+        }
+        return a.name.localeCompare(b.name);
+    });
+    
+    // Группируем соревнования по категориям
+    const grouped = {};
+    competitions.forEach(comp => {
+        const key = comp.category || 'Другие';
+        if (!grouped[key]) {
+            grouped[key] = [];
+        }
+        grouped[key].push(comp);
+    });
+    
+    // Формируем HTML
+    let html = '<div style="margin-bottom: 20px; padding: 10px; background: #e7f3ff; border-radius: 5px;">';
+    html += '<strong>Найдено соревнований: ' + competitions.length + '</strong>';
+    html += '<div style="font-size: 0.9em; color: #666; margin-top: 5px;">Сезон 2025/2026</div>';
+    html += '</div>';
+    
+    Object.keys(grouped).forEach(groupName => {
+        html += '<div class="competition-group">';
+        html += '<h4>' + groupName + '</h4>';
+        html += '<div style="display: grid; gap: 10px;">';
+        
+        grouped[groupName].forEach(comp => {
+            const isPdf = comp.url.includes('.pdf');
+            const linkClass = isPdf ? 'pdf-link' : 'html-link';
+            const icon = isPdf ? '📄' : '🌐';
+            
+            html += '<div class="competition-item ' + linkClass + '">';
+            html += '<div class="competition-item-header">';
+            html += '<span class="competition-item-icon">' + icon + '</span>';
+            html += '<div class="competition-item-content">';
+            html += '<div class="competition-item-title">' + (comp.name || comp.category) + '</div>';
+            html += '<div class="competition-item-description">' + comp.description + '</div>';
+            html += '<a href="' + comp.url + '" target="_blank" rel="noopener noreferrer" class="competition-item-url">';
+            html += comp.url;
+            html += '</a>';
+            html += '</div>';
+            html += '<a href="' + comp.url + '" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-small" style="white-space: nowrap;">Открыть</a>';
+            html += '</div>';
+            html += '</div>';
+        });
+        
+        html += '</div>';
+        html += '</div>';
+    });
+    
+    competitionsList.innerHTML = html;
+}
+
+// Делаем функции доступными глобально
 if (typeof window !== 'undefined') {
     window.selectSkaterForCompare = selectSkaterForCompare;
     window.clearSkaterSelection = clearSkaterSelection;
     window.initializeCompareSearch = initializeCompareSearch;
+    window.loadIsuCompetitions = loadIsuCompetitions;
+    window.displayCompetitionsList = displayCompetitionsList;
+    
+    console.log('Функции загружены в window:', {
+        loadIsuCompetitions: typeof window.loadIsuCompetitions,
+        displayCompetitionsList: typeof window.displayCompetitionsList
+    });
 }
 

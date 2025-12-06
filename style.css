@@ -1192,3 +1192,84 @@ header h1 {
         gap: 10px;
     }
 }
+
+/* Стили для страницы соревнований ISU */
+.competitions-list {
+    margin-top: 20px;
+}
+
+.competition-group {
+    margin-bottom: 25px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+}
+
+.competition-group h4 {
+    margin-top: 0;
+    color: #1e3c72;
+    margin-bottom: 15px;
+    font-size: 1.1em;
+}
+
+.competition-item {
+    padding: 12px;
+    background: white;
+    border-radius: 5px;
+    border-left: 3px solid #007bff;
+    margin-bottom: 10px;
+    transition: box-shadow 0.2s;
+}
+
+.competition-item:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.competition-item-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.competition-item-icon {
+    font-size: 1.3em;
+}
+
+.competition-item-content {
+    flex: 1;
+}
+
+.competition-item-title {
+    font-weight: 600;
+    margin-bottom: 5px;
+    color: #333;
+}
+
+.competition-item-description {
+    font-size: 0.9em;
+    color: #666;
+    margin-bottom: 8px;
+}
+
+.competition-item-url {
+    color: #007bff;
+    text-decoration: none;
+    font-size: 0.85em;
+    word-break: break-all;
+    display: block;
+    margin-bottom: 8px;
+}
+
+.competition-item-url:hover {
+    text-decoration: underline;
+}
+
+.pdf-link {
+    border-left-color: #dc3545;
+}
+
+.html-link {
+    border-left-color: #007bff;
+}

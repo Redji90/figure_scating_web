@@ -48,6 +48,14 @@
                                 <div class="home-btn-desc">Сравните двух фигуристов по оценкам и статистике</div>
                             </div>
                         </button>
+                        
+                        <button class="home-btn" onclick="showPage('isuCompetitionsPage')">
+                            <div class="home-btn-icon">🏆</div>
+                            <div class="home-btn-content">
+                                <div class="home-btn-title">Соревнования ISU</div>
+                                <div class="home-btn-desc">Список соревнований ISU сезона 2025/2026 с результатами</div>
+                            </div>
+                        </button>
                     </div>
                 </div>
             </section>
@@ -219,6 +227,25 @@
                     </div>
                 </section>
             </section>
+
+            <!-- Страница соревнований ISU -->
+            <section class="card page-section" id="isuCompetitionsPage" style="display: none;">
+                <div class="page-header">
+                    <button class="back-btn" onclick="showPage('homePage')">← Назад</button>
+                    <h2>Соревнования ISU сезон 2025/2026</h2>
+                </div>
+
+                <div class="card">
+                    <h3>Список соревнований</h3>
+                    <div style="margin-bottom: 15px;">
+                        <button id="loadIsuCompetitionsBtn" class="btn btn-primary">Загрузить список соревнований</button>
+                        <span id="loadingStatus" style="margin-left: 10px; color: #666;"></span>
+                    </div>
+                    <div id="isuCompetitionsList" class="competitions-list">
+                        <p class="empty-message">Нажмите кнопку "Загрузить список соревнований" для получения актуального списка</p>
+                    </div>
+                </div>
+            </section>
         </div>
     </div>
 
@@ -361,6 +388,12 @@
                     if (typeof loadCompetitionsFromDB === 'function') {
                         loadCompetitionsFromDB();
                     }
+                }
+                
+                // Загружаем список соревнований при переходе на страницу ISU
+                if (pageId === 'isuCompetitionsPage') {
+                    // Можно автоматически загрузить список или оставить кнопку
+                    // Автоматическая загрузка отключена, пользователь нажимает кнопку
                 }
                 
                 // Инициализируем поиск при переходе на страницу сравнения
