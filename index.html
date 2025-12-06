@@ -6,7 +6,6 @@
     <title>Аналитика фигурного катания</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="database.js"></script>
 </head>
 <body>
     <div class="container">
@@ -39,6 +38,14 @@
                             <div class="home-btn-content">
                                 <div class="home-btn-title">Поиск фигуристов</div>
                                 <div class="home-btn-desc">Найдите фигуриста в базе данных и просмотрите его статистику</div>
+                            </div>
+                        </button>
+                        
+                        <button class="home-btn" onclick="showPage('comparePage')">
+                            <div class="home-btn-icon">⚖️</div>
+                            <div class="home-btn-content">
+                                <div class="home-btn-title">Сравнение фигуристов</div>
+                                <div class="home-btn-desc">Сравните двух фигуристов по оценкам и статистике</div>
                             </div>
                         </button>
                     </div>
@@ -87,6 +94,19 @@
                         <input type="text" id="competitionName" placeholder="Введите название соревнования">
                     </div>
                     <div class="form-group">
+                        <label for="isuUrl">Ссылка на онлайн результаты ISU (опционально):</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="url" id="isuUrl" placeholder="https://www.isuresults.com/results/..." style="flex: 1;">
+                            <button id="loadIsuResultsBtn" class="btn btn-secondary">Загрузить</button>
+                        </div>
+                        <small style="color: #666; display: block; margin-top: 5px;">
+                            Поможет проверить, все ли фигуристы распознаны из PDF
+                        </small>
+                    </div>
+                    <div id="isuResultsInfo" class="isu-results-info" style="display: none; margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px;">
+                        <div id="isuResultsContent"></div>
+                    </div>
+                    <div class="form-group">
                         <button id="parseBtn" class="btn btn-primary" disabled>Анализировать PDF</button>
                         <button id="showDebugBtn" class="btn btn-secondary" style="margin-left: 10px;">Показать отладку</button>
                     </div>
@@ -122,6 +142,53 @@
                         <p>Отладочная информация появится после загрузки PDF</p>
                     </div>
                 </section>
+            </section>
+
+            <!-- Страница сравнения фигуристов -->
+            <section class="card page-section" id="comparePage" style="display: none;">
+                <div class="page-header">
+                    <button class="back-btn" onclick="showPage('homePage')">← Назад</button>
+                    <h2>Сравнение фигуристов</h2>
+                </div>
+
+                <div class="card compare-section">
+                    <h3>Выберите двух фигуристов для сравнения</h3>
+                    
+                    <div class="compare-selectors">
+                        <div class="compare-selector">
+                            <label>Фигурист 1:</label>
+                            <div class="search-container-compare">
+                                <input type="text" id="skater1Search" class="search-input" placeholder="Введите имя или фамилию (минимум 3 символа)...">
+                                <div id="skater1Results" class="search-results"></div>
+                            </div>
+                            <div id="skater1Info" class="selected-skater-info" style="display: none;"></div>
+                        </div>
+                        
+                        <div class="vs-divider">VS</div>
+                        
+                        <div class="compare-selector">
+                            <label>Фигурист 2:</label>
+                            <div class="search-container-compare">
+                                <input type="text" id="skater2Search" class="search-input" placeholder="Введите имя или фамилию (минимум 3 символа)...">
+                                <div id="skater2Results" class="search-results"></div>
+                            </div>
+                            <div id="skater2Info" class="selected-skater-info" style="display: none;"></div>
+                        </div>
+                    </div>
+                    
+                    <div id="compareResults" class="compare-results" style="display: none;"></div>
+                    
+                    <!-- Визуальная консоль для отладки -->
+                    <div class="debug-console" id="compareDebugConsole">
+                        <div class="debug-console-header">
+                            <h4>🔍 Консоль отладки поиска</h4>
+                            <button onclick="clearDebugConsole()" class="btn btn-small">Очистить</button>
+                        </div>
+                        <div class="debug-console-content" id="debugConsoleContent">
+                            <div class="debug-log">Ожидание инициализации...</div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- Страница поиска фигуристов -->
@@ -161,10 +228,118 @@
             pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         }
     </script>
+    <script src="database.js"></script>
     <script src="script.js"></script>
+    <script>
+        console.log('📦 Скрипты загружены');
+        console.log('📦 Проверка функций:', {
+            initializeCompareSearch: typeof initializeCompareSearch,
+            initDatabase: typeof initDatabase,
+            searchSkaters: typeof searchSkaters
+        });
+        
+        // Функция для инициализации поиска на странице сравнения
+        function initComparePageIfVisible() {
+            const comparePage = document.getElementById('comparePage');
+            const skater1Input = document.getElementById('skater1Search');
+            
+            console.log('🔍 Проверка страницы сравнения:', {
+                comparePageExists: !!comparePage,
+                comparePageDisplay: comparePage ? comparePage.style.display : 'не найден',
+                comparePageVisible: comparePage ? (comparePage.offsetParent !== null) : false,
+                comparePageComputed: comparePage ? window.getComputedStyle(comparePage).display : 'не найден',
+                skater1InputExists: !!skater1Input
+            });
+            
+            // Проверяем видимость страницы разными способами
+            const isVisible = comparePage && (
+                comparePage.offsetParent !== null || 
+                comparePage.style.display === 'block' ||
+                window.getComputedStyle(comparePage).display !== 'none'
+            );
+            
+            if (isVisible && skater1Input) {
+                console.log('✅ Страница сравнения видна, инициализируем поиск');
+                setTimeout(() => {
+                    if (typeof initializeCompareSearch === 'function') {
+                        console.log('✅ Вызываем initializeCompareSearch из initComparePageIfVisible');
+                        initializeCompareSearch();
+                    } else if (typeof window.initializeCompareSearch === 'function') {
+                        console.log('✅ Вызываем window.initializeCompareSearch из initComparePageIfVisible');
+                        window.initializeCompareSearch();
+                    } else {
+                        console.error('❌ Функция initializeCompareSearch не найдена');
+                    }
+                }, 300);
+            } else {
+                console.log('⏸️ Страница сравнения не видна, инициализация не требуется');
+            }
+        }
+        
+        // Проверяем при загрузке DOM
+        window.addEventListener('DOMContentLoaded', () => {
+            console.log('📦 DOM загружен');
+            initComparePageIfVisible();
+        });
+        
+        // Проверяем при полной загрузке страницы
+        window.addEventListener('load', () => {
+            console.log('📦 Страница полностью загружена');
+            initComparePageIfVisible();
+        });
+        
+        // Также проверяем через небольшую задержку (на случай, если страница открывается динамически)
+        setTimeout(() => {
+            console.log('📦 Проверка через 1 секунду после загрузки');
+            initComparePageIfVisible();
+        }, 1000);
+        
+        // Еще одна проверка через 2 секунды (на случай медленной загрузки)
+        setTimeout(() => {
+            console.log('📦 Проверка через 2 секунды после загрузки');
+            initComparePageIfVisible();
+        }, 2000);
+        
+        // Если пользователь уже на странице сравнения, принудительно инициализируем
+        // (это может произойти, если страница была открыта напрямую или через закладку)
+        setTimeout(() => {
+            const comparePage = document.getElementById('comparePage');
+            const skater1Input = document.getElementById('skater1Search');
+            if (comparePage && skater1Input) {
+                // Проверяем, видна ли страница на экране (даже если display: none)
+                const rect = comparePage.getBoundingClientRect();
+                const isOnScreen = rect.width > 0 && rect.height > 0;
+                const hasText = skater1Input.value && skater1Input.value.trim().length > 0;
+                
+                console.log('📦 Финальная проверка страницы сравнения:', {
+                    exists: !!comparePage,
+                    hasInput: !!skater1Input,
+                    hasText: hasText,
+                    textValue: skater1Input.value,
+                    rect: { width: rect.width, height: rect.height },
+                    isOnScreen: isOnScreen,
+                    display: comparePage.style.display,
+                    computedDisplay: window.getComputedStyle(comparePage).display
+                });
+                
+                // Если страница видна, есть текст в поле, или страница отображается - инициализируем
+                if ((isOnScreen || comparePage.style.display === 'block' || hasText) && typeof initializeCompareSearch === 'function') {
+                    console.log('✅ Принудительная инициализация поиска (страница видна или есть данные)');
+                    try {
+                        initializeCompareSearch();
+                    } catch (error) {
+                        console.error('❌ Ошибка при принудительной инициализации:', error);
+                    }
+                } else {
+                    console.log('⏸️ Условия для принудительной инициализации не выполнены');
+                }
+            }
+        }, 1500);
+    </script>
     <script>
         // Навигация между страницами
         function showPage(pageId) {
+            console.log('🔵 showPage вызвана с pageId:', pageId);
             // Скрываем все страницы
             document.querySelectorAll('.page-section, .home-page').forEach(page => {
                 page.style.display = 'none';
@@ -174,6 +349,7 @@
             const targetPage = document.getElementById(pageId);
             if (targetPage) {
                 targetPage.style.display = 'block';
+                console.log('🔵 Страница', pageId, 'показана, display:', targetPage.style.display);
                 // Прокручиваем вверх страницы
                 window.scrollTo({ top: 0, behavior: 'smooth' });
                 
@@ -185,6 +361,61 @@
                     if (typeof loadCompetitionsFromDB === 'function') {
                         loadCompetitionsFromDB();
                     }
+                }
+                
+                // Инициализируем поиск при переходе на страницу сравнения
+                if (pageId === 'comparePage') {
+                    console.log('🔵 ===== ПЕРЕХОД НА СТРАНИЦУ СРАВНЕНИЯ =====');
+                    // Небольшая задержка, чтобы убедиться, что DOM готов
+                    setTimeout(() => {
+                        console.log('🔵 Инициализация страницы сравнения...');
+                        const skater1Input = document.getElementById('skater1Search');
+                        const skater2Input = document.getElementById('skater2Search');
+                        const comparePage = document.getElementById('comparePage');
+                        
+                        console.log('🔵 Проверка элементов:', { 
+                            comparePage: !!comparePage,
+                            comparePageDisplay: comparePage ? comparePage.style.display : 'не найден',
+                            skater1Input: !!skater1Input, 
+                            skater2Input: !!skater2Input,
+                            skater1Id: skater1Input ? skater1Input.id : 'не найден',
+                            skater2Id: skater2Input ? skater2Input.id : 'не найден'
+                        });
+                        
+                        console.log('🔵 Проверка функций:', {
+                            initializeCompareSearch: typeof initializeCompareSearch,
+                            windowInit: typeof window.initializeCompareSearch,
+                            initDatabase: typeof initDatabase,
+                            windowInitDB: typeof window.initDatabase
+                        });
+                        
+                        if (!skater1Input || !skater2Input) {
+                            console.error('❌ Элементы поиска не найдены!');
+                            return;
+                        }
+                        
+                        if (typeof initializeCompareSearch === 'function') {
+                            console.log('✅ Вызываем initializeCompareSearch');
+                            try {
+                                initializeCompareSearch();
+                            } catch (error) {
+                                console.error('❌ Ошибка при вызове initializeCompareSearch:', error);
+                            }
+                        } else if (typeof window.initializeCompareSearch === 'function') {
+                            console.log('✅ Вызываем window.initializeCompareSearch');
+                            try {
+                                window.initializeCompareSearch();
+                            } catch (error) {
+                                console.error('❌ Ошибка при вызове window.initializeCompareSearch:', error);
+                            }
+                        } else {
+                            console.error('❌ Функция initializeCompareSearch не найдена!', {
+                                initializeCompareSearch: typeof initializeCompareSearch,
+                                windowInit: typeof window.initializeCompareSearch
+                            });
+                            console.error('Проверьте, что script.js загружен правильно');
+                        }
+                    }, 300);
                 }
             }
         }

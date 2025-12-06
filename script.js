@@ -2,7 +2,8 @@
 let currentPdfFile = null;
 let currentPdfData = null;
 let savedResults = JSON.parse(localStorage.getItem('figureSkatingResults')) || [];
-let debugLog = []; // Массив для хранения отладочных сообщений
+let debugMessages = []; // Массив для хранения отладочных сообщений (старая переменная, не используется)
+let results = null; // Глобальная переменная для хранения результатов парсинга PDF
 
 // Инициализация при загрузке страницы
 document.addEventListener('DOMContentLoaded', async () => {
@@ -78,6 +79,22 @@ function initializeEventListeners() {
                 if (toggleDebugBtn) {
                     toggleDebugBtn.textContent = 'Скрыть';
                 }
+            }
+        });
+    }
+    
+    // Загрузка результатов ISU
+    const loadIsuResultsBtn = document.getElementById('loadIsuResultsBtn');
+    if (loadIsuResultsBtn) {
+        loadIsuResultsBtn.addEventListener('click', loadIsuResults);
+    }
+    
+    // Enter в поле URL
+    const isuUrlInput = document.getElementById('isuUrl');
+    if (isuUrlInput) {
+        isuUrlInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                loadIsuResults();
             }
         });
     }
@@ -316,8 +333,15 @@ async function parsePdf() {
         addDebugLog(`Извлечено ${fullText.length} символов из PDF`, 'info');
         addDebugLog(`Первые 500 символов: ${fullText.substring(0, 500)}`, 'info');
         
-        // Парсинг данных
-        const parsedData = parseSkatingResults(fullText);
+        // Проверяем формат файла (ISU или российский)
+        let parsedData;
+        if (fullText.includes('JUDGES DETAILS PER SKATER') || fullText.match(/\d+\s+[A-Z][a-z]+\s+[A-Z]+\s+[A-Z]{3}\s+\d+/)) {
+            addDebugLog('Обнаружен международный формат ISU', 'info');
+            parsedData = parseISUFormat(fullText);
+        } else {
+            parsedData = parseSkatingResults(fullText);
+        }
+        
         currentPdfData = parsedData;
         
         addDebugLog(`Парсинг завершен. Найдено фигуристов: ${parsedData.skaters.length}`, 
@@ -399,7 +423,7 @@ function parseSkatingResults(text) {
         }
     }
     
-    const results = {
+    results = {
         firstLine: firstLine, // Сохраняем первую строку полностью
         competitionName: competitionName,
         fileName: currentPdfFile.name,
@@ -1259,6 +1283,694 @@ function parseAlternativeFormat(text) {
     return skaters;
 }
 
+// Парсинг международного формата ISU
+function parseISUFormat(text) {
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+    results = {
+        firstLine: lines.length > 0 ? lines[0] : '',
+        competitionName: extractISUCompetitionName(text),
+        fileName: currentPdfFile.name,
+        parsedAt: new Date().toISOString(),
+        skaters: []
+    };
+    
+    let currentSkater = null;
+    let parsingState = 'searching'; // searching, elements, components
+    
+    addDebugLog('=== ПАРСИНГ ISU ФОРМАТА ===', 'info');
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // СНАЧАЛА проверяем, не является ли строка новым фигуристом (даже если мы в режиме компонентов)
+        // Это критично, чтобы не пропустить фигуристов и не приписать их компоненты предыдущему
+        let skaterMatch = null;
+        
+        // Поиск строки с фигуристом: "1 Yuma KAGIYAMA JPN 5 108.77 61.54 47.23 0.00"
+        // Или: "5 Adam SIAO HIM FA FRA 3 78.49 37.43 42.06 1.00"
+        // Формат: Rank Name Surname Nation StartingNumber TotalScore ElementScore ComponentScore Deductions
+        // Имя может быть с заглавной буквы (Yuma, Adam), фамилия может быть полностью заглавными (KAGIYAMA, SIAO HIM FA)
+        // Более гибкий паттерн: номер, имя (может быть несколько слов), фамилия (может быть несколько слов), нация (3 буквы), номер старта, 4 числа
+        // Используем более гибкий паттерн, который допускает разные форматы имен
+        
+        // Сначала пробуем строгий паттерн
+        let skaterPattern = /^(\d+)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+([A-Z]+(?:\s+[A-Z]+)*)\s+([A-Z]{3})\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.+-]+)$/;
+        skaterMatch = line.match(skaterPattern);
+        
+        // Если не нашли, пробуем более гибкий паттерн (допускаем смешанный регистр в фамилии)
+        if (!skaterMatch) {
+            // Паттерн, который допускает любые буквы в имени и фамилии после первой буквы
+            skaterPattern = /^(\d+)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\s+([A-Z]{3})\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.+-]+)$/;
+            skaterMatch = line.match(skaterPattern);
+        }
+        
+        // Если все еще не нашли, пробуем еще более гибкий - просто ищем строку, которая начинается с числа и содержит 3-буквенный код нации
+        if (!skaterMatch && /^\d+\s+[A-Z]/.test(line)) {
+            // Разбиваем строку на части и проверяем вручную
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 9) {
+                const rank = parseInt(parts[0]);
+                // Ищем 3-буквенный код нации (обычно это код страны)
+                let nationIndex = -1;
+                for (let j = 1; j < parts.length; j++) {
+                    if (parts[j].length === 3 && /^[A-Z]{3}$/.test(parts[j])) {
+                        nationIndex = j;
+                        break;
+                    }
+                }
+                
+                if (nationIndex > 0 && nationIndex < parts.length - 5 && !isNaN(rank) && rank > 0) {
+                    // Проверяем, что после нации идут числа (номер старта и оценки)
+                    const startNum = parseInt(parts[nationIndex + 1]);
+                    const totalScore = parseFloat(parts[nationIndex + 2]);
+                    
+                    if (!isNaN(startNum) && !isNaN(totalScore) && totalScore > 0) {
+                        // Это похоже на строку с фигуристом
+                        // Разделяем имя и фамилию: имя - слова с первой заглавной и остальными строчными (Adam)
+                        // Фамилия - все остальные слова до нации, обычно все заглавные (SIAO HIM FA)
+                        const nameParts = parts.slice(1, nationIndex);
+                        let firstNameParts = [];
+                        let lastNameParts = [];
+                        let foundLastName = false;
+                        
+                        for (let k = 0; k < nameParts.length; k++) {
+                            const part = nameParts[k];
+                            // Если слово полностью заглавными или начинается с заглавной и содержит строчные - это имя
+                            // Если слово полностью заглавными и длина > 1 - это фамилия
+                            if (!foundLastName && /^[A-Z][a-z]+$/.test(part)) {
+                                // Слово с первой заглавной и остальными строчными - это имя
+                                firstNameParts.push(part);
+                            } else if (/^[A-Z]+$/.test(part) && part.length > 1) {
+                                // Слово полностью заглавными - это фамилия
+                                foundLastName = true;
+                                lastNameParts.push(part);
+                            } else if (foundLastName) {
+                                // Если уже нашли фамилию, все последующие слова - тоже фамилия
+                                lastNameParts.push(part);
+                            } else {
+                                // Неопределенный случай - добавляем к имени
+                                firstNameParts.push(part);
+                            }
+                        }
+                        
+                        // Если не нашли фамилию, берем последнее слово как фамилию
+                        if (lastNameParts.length === 0 && nameParts.length > 0) {
+                            lastNameParts = [nameParts[nameParts.length - 1]];
+                            firstNameParts = nameParts.slice(0, nameParts.length - 1);
+                        }
+                        
+                        // Если имя пустое, берем первое слово как имя
+                        if (firstNameParts.length === 0 && nameParts.length > 0) {
+                            firstNameParts = [nameParts[0]];
+                            lastNameParts = nameParts.slice(1);
+                        }
+                        
+                        const firstName = firstNameParts.join(' ');
+                        const lastName = lastNameParts.join(' ');
+                        const nation = parts[nationIndex];
+                        const startingNumber = startNum;
+                        const elementScore = parseFloat(parts[nationIndex + 3]);
+                        const componentScore = parseFloat(parts[nationIndex + 4]);
+                        const deductions = parseFloat(parts[nationIndex + 5]);
+                        
+                        // Проверяем, что все значения валидны (deductions может быть отрицательным)
+                        if (!isNaN(elementScore) && !isNaN(componentScore) && !isNaN(deductions)) {
+                            // Создаем объект match вручную
+                            skaterMatch = [
+                                line,
+                                rank.toString(),
+                                firstName,
+                                lastName,
+                                nation,
+                                startingNumber.toString(),
+                                totalScore.toString(),
+                                elementScore.toString(),
+                                componentScore.toString(),
+                                deductions.toString()
+                            ];
+                            
+                            addDebugLog(`⚠️ Фигурист найден альтернативным методом: ${firstName} ${lastName} (место: ${rank}, нация: ${nation})`, 'warning');
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Дополнительная проверка: если строка похожа на фигуриста, но не распознана, пробуем альтернативный метод
+        // ВАЖНО: эта проверка должна выполняться ДО проверки на компоненты, чтобы не пропустить фигуристов
+        if (!skaterMatch && /^\d+\s+[A-Z]/.test(line)) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 9) { // Минимум: место, имя, фамилия, нация, номер старта, 4 оценки
+                const rank = parseInt(parts[0]);
+                // Проверяем, есть ли 3-буквенный код нации
+                let nationIndex = -1;
+                for (let j = 1; j < parts.length; j++) {
+                    if (parts[j].length === 3 && /^[A-Z]{3}$/.test(parts[j])) {
+                        nationIndex = j;
+                        break;
+                    }
+                }
+                
+                if (!isNaN(rank) && rank > 0 && rank <= 10 && nationIndex > 0 && nationIndex < parts.length - 5) {
+                    // Пробуем альтернативный метод парсинга
+                    const startNum = parseInt(parts[nationIndex + 1]);
+                    const totalScore = parseFloat(parts[nationIndex + 2]);
+                    
+                    // Проверяем, что это валидные числа (totalScore может быть любым, deductions может быть отрицательным)
+                    if (!isNaN(startNum) && !isNaN(totalScore) && totalScore > 0) {
+                        const nameParts = parts.slice(1, nationIndex);
+                        let firstNameParts = [];
+                        let lastNameParts = [];
+                        let foundLastName = false;
+                        
+                        for (let k = 0; k < nameParts.length; k++) {
+                            const part = nameParts[k];
+                            if (!foundLastName && /^[A-Z][a-z]+$/.test(part)) {
+                                firstNameParts.push(part);
+                            } else if (/^[A-Z]+$/.test(part) && part.length > 1) {
+                                foundLastName = true;
+                                lastNameParts.push(part);
+                            } else if (foundLastName) {
+                                lastNameParts.push(part);
+                            } else {
+                                firstNameParts.push(part);
+                            }
+                        }
+                        
+                        if (lastNameParts.length === 0 && nameParts.length > 0) {
+                            lastNameParts = [nameParts[nameParts.length - 1]];
+                            firstNameParts = nameParts.slice(0, nameParts.length - 1);
+                        }
+                        
+                        if (firstNameParts.length === 0 && nameParts.length > 0) {
+                            firstNameParts = [nameParts[0]];
+                            lastNameParts = nameParts.slice(1);
+                        }
+                        
+                        const firstName = firstNameParts.join(' ');
+                        const lastName = lastNameParts.join(' ');
+                        const nation = parts[nationIndex];
+                        const startingNumber = startNum;
+                        const elementScore = parseFloat(parts[nationIndex + 3]);
+                        const componentScore = parseFloat(parts[nationIndex + 4]);
+                        const deductions = parseFloat(parts[nationIndex + 5]);
+                        
+                        // Проверяем, что все значения валидны
+                        if (!isNaN(elementScore) && !isNaN(componentScore) && !isNaN(deductions)) {
+                            // Создаем объект match вручную
+                            skaterMatch = [
+                                line,
+                                rank.toString(),
+                                firstName,
+                                lastName,
+                                nation,
+                                startingNumber.toString(),
+                                totalScore.toString(),
+                                elementScore.toString(),
+                                componentScore.toString(),
+                                deductions.toString()
+                            ];
+                            
+                            addDebugLog(`⚠️ Фигурист найден альтернативным методом (дополнительная проверка): ${firstName} ${lastName} (место: ${rank}, нация: ${nation})`, 'warning');
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (skaterMatch) {
+            // Сохраняем предыдущего фигуриста
+            if (currentSkater && currentSkater.name) {
+                results.skaters.push(currentSkater);
+                addDebugLog(`✓ Сохранен фигурист: ${currentSkater.name} (элементов: ${currentSkater.scores.elements.length}, компонентов: ${currentSkater.scores.programComponents.length})`, 'info');
+            }
+            
+            const rank = parseInt(skaterMatch[1]);
+            let firstName = skaterMatch[2];
+            let lastName = skaterMatch[3];
+            const nation = skaterMatch[4];
+            const startingNumber = parseInt(skaterMatch[5]);
+            const totalScore = parseFloat(skaterMatch[6]);
+            const elementScore = parseFloat(skaterMatch[7]);
+            const componentScore = parseFloat(skaterMatch[8]);
+            const deductions = parseFloat(skaterMatch[9]);
+            
+            // Если фамилия содержит несколько слов (например, "SIAO HIM FA"), объединяем их
+            // Проверяем, не является ли следующее слово после firstName частью фамилии
+            if (skaterMatch.length > 10) {
+                // Это альтернативный метод парсинга, где мы уже правильно разделили имя и фамилию
+                // firstName и lastName уже правильные
+            } else {
+                // Стандартный метод - проверяем, нужно ли объединить несколько слов в фамилию
+                // Если после lastName идет еще одно слово с заглавными буквами до нации, это часть фамилии
+            }
+            
+            currentSkater = {
+                place: rank,
+                name: `${firstName} ${lastName}`,
+                nation: nation,
+                startingNumber: startingNumber,
+                totalScore: totalScore,
+                elementScore: elementScore,
+                componentScore: componentScore,
+                scores: {
+                    deductions: deductions,
+                    elements: [],
+                    programComponents: []
+                }
+            };
+            
+            addDebugLog(`НАЙДЕН ФИГУРИСТ ISU: ${currentSkater.name} (место: ${rank}, нация: ${nation})`, 'success');
+            parsingState = 'elements';
+            continue;
+        }
+        
+        // Также проверяем на начало нового фигуриста даже в режиме компонентов
+        // Это нужно, если предыдущий фигурист не был распознан, но его компоненты парсятся
+        if (parsingState === 'components' && !skaterMatch) {
+            // Пробуем более мягкий паттерн для поиска фигуриста
+            // Формат может быть: "5 Adam SIAO HIM FA FRA 3 78.49..."
+            const softSkaterPattern = /^(\d+)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+([A-Z]+(?:\s+[A-Z]+)*)\s+([A-Z]{3})\s+(\d+)\s+([\d.]+)/;
+            const softMatch = line.match(softSkaterPattern);
+            
+            if (softMatch && softMatch[1] && parseInt(softMatch[1]) > 0) {
+                const rank = parseInt(softMatch[1]);
+                // Проверяем, что это не компонент и не элемент
+                if (!line.match(/^(Composition|Presentation|Skating Skills|Performance|Interpretation)/i) &&
+                    !/^\d+\s+[A-Z0-9]/.test(line)) {
+                    // Это может быть новый фигурист
+                    addDebugLog(`⚠️ Возможный новый фигурист в режиме компонентов: ${line.substring(0, 80)}`, 'warning');
+                }
+            }
+        }
+        
+        if (!currentSkater) continue;
+        
+        // Парсинг элементов: "1 4T+3T 13.70 3.94 4 3 4 3 4 4 5 5 5 17.64"
+        // Формат: # ElementName BaseValue GOE J1 J2 J3 J4 J5 J6 J7 J8 J9 Score
+        // Может быть 7 или 9 судей
+        if (parsingState === 'elements') {
+            // Проверяем, не начались ли компоненты (но только если это точно компонент, а не элемент с похожим названием)
+            // Компонент должен начинаться с названия и содержать фактор и оценки судей
+            const componentStartPattern = /^(Composition|Presentation|Skating Skills|Performance|Interpretation)\s+[\d.]+\s+[\d.]+/i;
+            if (line.match(componentStartPattern)) {
+                addDebugLog(`✓ Переключение на компоненты (найдено: ${line.substring(0, 30)})`, 'info');
+                parsingState = 'components';
+                // Продолжаем выполнение, чтобы обработать компонент в блоке компонентов ниже
+            } else {
+                // Проверяем, что строка начинается с цифры (номер элемента)
+                if (!/^\d+\s+/.test(line)) {
+                    continue; // Пропускаем строки, которые не начинаются с номера элемента
+                }
+            }
+            
+            // Если мы переключились на компоненты, выходим из блока элементов
+            if (parsingState === 'components') {
+                // Продолжаем выполнение, чтобы обработать компонент в блоке компонентов ниже
+                // НЕ обрабатываем эту строку как элемент
+            } else {
+                // Более гибкий парсинг: разбиваем строку на части и анализируем
+            const parts = line.trim().split(/\s+/);
+            if (parts.length < 5) continue; // Минимум: номер, название, базовая, GOE, оценка
+            
+            // Номер элемента - первое число
+            const elementNumber = parseInt(parts[0]);
+            if (isNaN(elementNumber)) continue;
+            
+            // Ищем базовую стоимость и GOE (это числа с точкой)
+            let baseValueIndex = -1;
+            let goeIndex = -1;
+            let panelScoreIndex = -1;
+            
+            for (let i = 1; i < parts.length; i++) {
+                const part = parts[i];
+                // Базовая стоимость - число с точкой, обычно после названия элемента
+                if (baseValueIndex === -1 && /^\d+\.\d+$/.test(part)) {
+                    baseValueIndex = i;
+                }
+                // GOE - число с точкой или знак +/-, обычно после базовой стоимости
+                else if (baseValueIndex !== -1 && goeIndex === -1 && /^[+-]?\d+\.\d+$/.test(part)) {
+                    goeIndex = i;
+                }
+            }
+            
+            // Последнее число с точкой - это оценка бригады
+            for (let i = parts.length - 1; i >= 0; i--) {
+                if (/^\d+\.\d+$/.test(parts[i])) {
+                    panelScoreIndex = i;
+                    break;
+                }
+            }
+            
+            if (baseValueIndex === -1 || goeIndex === -1 || panelScoreIndex === -1) {
+                if (/^\d+\s+[A-Z0-9]/.test(line)) {
+                    addDebugLog(`⚠️ Не удалось найти базовую стоимость, GOE или оценку в строке: ${line.substring(0, 100)}`, 'warning');
+                }
+                continue;
+            }
+            
+            // Название элемента - все части между номером и базовой стоимостью
+            const elementNameParts = parts.slice(1, baseValueIndex);
+            let elementName = elementNameParts.join(' ');
+            
+            // Убираем маркеры качества из названия (q, e, <, <<, x) - они будут в отдельном поле
+            const qualityMarkers = [];
+            const cleanedNameParts = [];
+            for (const part of elementNameParts) {
+                if (/^[qex<>!]+$/i.test(part)) {
+                    qualityMarkers.push(part);
+                } else {
+                    cleanedNameParts.push(part);
+                }
+            }
+            elementName = cleanedNameParts.join(' ');
+            
+            // Проверяем наличие "x" между базовой стоимостью и GOE
+            let hasBonus = false;
+            if (goeIndex > baseValueIndex + 1) {
+                const betweenParts = parts.slice(baseValueIndex + 1, goeIndex);
+                if (betweenParts.includes('x') || betweenParts.some(p => p.toLowerCase() === 'x')) {
+                    hasBonus = true;
+                }
+            }
+            
+            // Проверяем наличие "x" в названии
+            if (!hasBonus && (elementName.includes('x') || qualityMarkers.some(m => m.toLowerCase() === 'x'))) {
+                hasBonus = true;
+                elementName = elementName.replace(/\s*x\s*/gi, ' ').trim();
+            }
+            
+            const baseValue = parseFloat(parts[baseValueIndex]);
+            const goe = parseFloat(parts[goeIndex]);
+            const panelScore = parseFloat(parts[panelScoreIndex]);
+            
+            // Судьи - все числа между GOE и оценкой бригады
+            const judgeScores = [];
+            for (let i = goeIndex + 1; i < panelScoreIndex; i++) {
+                const score = parseInt(parts[i]);
+                if (!isNaN(score) && score >= -5 && score <= 5) {
+                    judgeScores.push(score);
+                }
+            }
+            
+            // Если нашли все необходимые данные, создаем элемент
+            if (!isNaN(baseValue) && !isNaN(goe) && !isNaN(panelScore) && judgeScores.length > 0) {
+                currentSkater.scores.elements.push({
+                    number: elementNumber,
+                    name: elementName,
+                    baseValue: baseValue,
+                    GOE: goe,  // Сохраняем как GOE для совместимости
+                    goe: goe,  // Также сохраняем как goe для ISU формата
+                    judgeScores: judgeScores,
+                    panelScore: panelScore,
+                    bonus: hasBonus
+                });
+                
+                addDebugLog(`✓ Элемент ISU: ${elementName}, базовая: ${baseValue}, GOE: ${goe}, судей: ${judgeScores.length}, оценка: ${panelScore}`, 'success');
+            } else {
+                if (/^\d+\s+[A-Z0-9]/.test(line)) {
+                    addDebugLog(`⚠️ Не удалось распарсить элемент (базовая: ${baseValue}, GOE: ${goe}, оценка: ${panelScore}, судей: ${judgeScores.length}): ${line.substring(0, 100)}`, 'warning');
+                }
+            }
+            }
+        }
+        
+        // Парсинг компонентов: "Composition 1.67 9.25 8.75 9.50 9.00 9.50 9.25 9.50 9.50 9.50 9.36"
+        // Формат: ComponentName Factor J1 J2 J3 J4 J5 J6 J7 J8 J9 AverageScore
+        // Может быть 7 или 9 судей
+        if (parsingState === 'components') {
+            // СНАЧАЛА проверяем, не начался ли новый фигурист
+            // Это важно, чтобы компоненты не приписывались неправильному фигуристу
+            let newSkaterMatch = null;
+            
+            // Пробуем основной паттерн (допускаем отрицательные deductions)
+            const newSkaterPattern = /^(\d+)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+([A-Z]+(?:\s+[A-Z]+)*)\s+([A-Z]{3})\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.+-]+)$/;
+            newSkaterMatch = line.match(newSkaterPattern);
+            
+            // Если не нашли, пробуем альтернативный метод (как выше)
+            if (!newSkaterMatch && /^\d+\s+[A-Z]/.test(line)) {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 9) {
+                    const rank = parseInt(parts[0]);
+                    let nationIndex = -1;
+                    for (let j = 1; j < parts.length; j++) {
+                        if (parts[j].length === 3 && /^[A-Z]{3}$/.test(parts[j])) {
+                            nationIndex = j;
+                            break;
+                        }
+                    }
+                    
+                    if (nationIndex > 0 && nationIndex < parts.length - 5 && !isNaN(rank) && rank > 0) {
+                        const startNum = parseInt(parts[nationIndex + 1]);
+                        const totalScore = parseFloat(parts[nationIndex + 2]);
+                        
+                        if (!isNaN(startNum) && !isNaN(totalScore) && totalScore > 0) {
+                            const nameParts = parts.slice(1, nationIndex);
+                            let firstNameParts = [];
+                            let lastNameParts = [];
+                            let foundLastName = false;
+                            
+                            for (let k = 0; k < nameParts.length; k++) {
+                                const part = nameParts[k];
+                                if (!foundLastName && /^[A-Z][a-z]+$/.test(part)) {
+                                    firstNameParts.push(part);
+                                } else if (/^[A-Z]+$/.test(part) && part.length > 1) {
+                                    foundLastName = true;
+                                    lastNameParts.push(part);
+                                } else if (foundLastName) {
+                                    lastNameParts.push(part);
+                                } else {
+                                    firstNameParts.push(part);
+                                }
+                            }
+                            
+                            if (lastNameParts.length === 0 && nameParts.length > 0) {
+                                lastNameParts = [nameParts[nameParts.length - 1]];
+                                firstNameParts = nameParts.slice(0, nameParts.length - 1);
+                            }
+                            
+                            if (firstNameParts.length === 0 && nameParts.length > 0) {
+                                firstNameParts = [nameParts[0]];
+                                lastNameParts = nameParts.slice(1);
+                            }
+                            
+                            const firstName = firstNameParts.join(' ');
+                            const lastName = lastNameParts.join(' ');
+                            const nation = parts[nationIndex];
+                            const startingNumber = startNum;
+                            const elementScore = parseFloat(parts[nationIndex + 3]);
+                            const componentScore = parseFloat(parts[nationIndex + 4]);
+                            const deductions = parseFloat(parts[nationIndex + 5]);
+                            
+                            newSkaterMatch = [
+                                line,
+                                rank.toString(),
+                                firstName,
+                                lastName,
+                                nation,
+                                startingNumber.toString(),
+                                totalScore.toString(),
+                                elementScore.toString(),
+                                componentScore.toString(),
+                                deductions.toString()
+                            ];
+                            
+                            addDebugLog(`⚠️ Фигурист найден альтернативным методом (в режиме компонентов): ${firstName} ${lastName} (место: ${rank}, нация: ${nation})`, 'warning');
+                        }
+                    }
+                }
+            }
+            
+            if (newSkaterMatch) {
+                // Сохраняем предыдущего фигуриста
+                if (currentSkater && currentSkater.name) {
+                    results.skaters.push(currentSkater);
+                    addDebugLog(`✓ Сохранен фигурист после компонентов: ${currentSkater.name} (элементов: ${currentSkater.scores.elements.length}, компонентов: ${currentSkater.scores.programComponents.length})`, 'info');
+                }
+                
+                const rank = parseInt(newSkaterMatch[1]);
+                const firstName = newSkaterMatch[2];
+                const lastName = newSkaterMatch[3];
+                const nation = newSkaterMatch[4];
+                const startingNumber = parseInt(newSkaterMatch[5]);
+                const totalScore = parseFloat(newSkaterMatch[6]);
+                const elementScore = parseFloat(newSkaterMatch[7]);
+                const componentScore = parseFloat(newSkaterMatch[8]);
+                const deductions = parseFloat(newSkaterMatch[9]);
+                
+                currentSkater = {
+                    place: rank,
+                    name: `${firstName} ${lastName}`,
+                    nation: nation,
+                    startingNumber: startingNumber,
+                    totalScore: totalScore,
+                    elementScore: elementScore,
+                    componentScore: componentScore,
+                    scores: {
+                        deductions: deductions,
+                        elements: [],
+                        programComponents: []
+                    }
+                };
+                
+                addDebugLog(`НАЙДЕН ФИГУРИСТ ISU (в режиме компонентов): ${currentSkater.name} (место: ${rank}, нация: ${nation})`, 'success');
+                parsingState = 'elements';
+                continue;
+            }
+            
+            // Пробуем сначала с 9 судьями
+            let componentPattern = /^(Composition|Presentation|Skating Skills|Performance|Interpretation)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)$/i;
+            let componentMatch = line.match(componentPattern);
+            let judgeCount = 9;
+            
+            if (!componentMatch) {
+                // Пробуем с 7 судьями
+                componentPattern = /^(Composition|Presentation|Skating Skills|Performance|Interpretation)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)$/i;
+                componentMatch = line.match(componentPattern);
+                if (componentMatch) {
+                    judgeCount = 7;
+                }
+            }
+            
+            // Если не нашли компонент, но строка начинается с названия компонента, пробуем более гибкий парсинг
+            if (!componentMatch && !newSkaterMatch && /^(Composition|Presentation|Skating Skills|Performance|Interpretation)/i.test(line)) {
+                addDebugLog(`⚠️ Строка похожа на компонент, но не распознана стандартным паттерном: ${line.substring(0, 120)}`, 'warning');
+                // Пробуем более гибкий парсинг компонента
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 3) {
+                    const componentName = parts[0];
+                    const factor = parseFloat(parts[1]);
+                    if (!isNaN(factor) && factor > 0) {
+                        // Пробуем извлечь оценки судей (все числа после фактора)
+                        // Формат: ComponentName Factor J1 J2 J3 J4 J5 J6 J7 J8 J9 AverageScore
+                        const allNumbers = [];
+                        for (let i = 2; i < parts.length; i++) {
+                            const num = parseFloat(parts[i]);
+                            if (!isNaN(num)) {
+                                allNumbers.push(num);
+                            }
+                        }
+                        
+                        // Если нашли достаточно чисел (минимум 8: 7-9 судей + средняя)
+                        if (allNumbers.length >= 8) {
+                            // Последнее число - это средняя оценка
+                            const averageScore = allNumbers[allNumbers.length - 1];
+                            // Все остальные - оценки судей
+                            const judgeScores = allNumbers.slice(0, allNumbers.length - 1);
+                            
+                            // Проверяем, что оценки судей в допустимом диапазоне (0-10)
+                            const validJudgeScores = judgeScores.filter(s => s >= 0 && s <= 10);
+                            
+                            if (validJudgeScores.length >= 7 && averageScore >= 0 && averageScore <= 10) {
+                                const componentNames = {
+                                    'Composition': 'Композиция',
+                                    'Presentation': 'Представление',
+                                    'Skating Skills': 'Мастерство катания',
+                                    'Performance': 'Представление',
+                                    'Interpretation': 'Интерпретация'
+                                };
+                                
+                                currentSkater.scores.programComponents.push({
+                                    name: componentNames[componentName] || componentName,
+                                    factor: factor,
+                                    judgeScores: validJudgeScores,
+                                    averageScore: averageScore
+                                });
+                                
+                                addDebugLog(`✓ Компонент ISU (гибкий парсинг): ${componentName}, фактор: ${factor}, средняя: ${averageScore}, судей: ${validJudgeScores.length}`, 'success');
+                                componentMatch = true; // Помечаем, что компонент обработан
+                            } else {
+                                addDebugLog(`  Недостаточно валидных оценок: найдено ${validJudgeScores.length} валидных из ${judgeScores.length}, средняя: ${averageScore}`, 'warning');
+                            }
+                        } else {
+                            addDebugLog(`  Недостаточно чисел: найдено ${allNumbers.length}, нужно минимум 8`, 'warning');
+                        }
+                    }
+                }
+            }
+            
+            if (componentMatch) {
+                const componentName = componentMatch[1];
+                const factor = parseFloat(componentMatch[2]);
+                let judgeScores = [];
+                let averageScore;
+                
+                if (judgeCount === 9) {
+                    judgeScores = [
+                        parseFloat(componentMatch[3]),
+                        parseFloat(componentMatch[4]),
+                        parseFloat(componentMatch[5]),
+                        parseFloat(componentMatch[6]),
+                        parseFloat(componentMatch[7]),
+                        parseFloat(componentMatch[8]),
+                        parseFloat(componentMatch[9]),
+                        parseFloat(componentMatch[10]),
+                        parseFloat(componentMatch[11])
+                    ];
+                    averageScore = parseFloat(componentMatch[12]);
+                } else {
+                    // 7 судей
+                    judgeScores = [
+                        parseFloat(componentMatch[3]),
+                        parseFloat(componentMatch[4]),
+                        parseFloat(componentMatch[5]),
+                        parseFloat(componentMatch[6]),
+                        parseFloat(componentMatch[7]),
+                        parseFloat(componentMatch[8]),
+                        parseFloat(componentMatch[9])
+                    ];
+                    averageScore = parseFloat(componentMatch[10]);
+                }
+                
+                // Переводим названия компонентов на русский
+                const componentNames = {
+                    'Composition': 'Композиция',
+                    'Presentation': 'Представление',
+                    'Skating Skills': 'Мастерство катания',
+                    'Performance': 'Представление',
+                    'Interpretation': 'Интерпретация'
+                };
+                
+                currentSkater.scores.programComponents.push({
+                    name: componentNames[componentName] || componentName,
+                    factor: factor,
+                    judgeScores: judgeScores,
+                    averageScore: averageScore
+                });
+                
+                addDebugLog(`✓ Компонент ISU: ${componentName}, фактор: ${factor}, средняя: ${averageScore}, судей: ${judgeScores.length}`, 'success');
+            } else if (!newSkaterMatch && /^(Composition|Presentation|Skating Skills|Performance|Interpretation)/i.test(line)) {
+                // Строка начинается с названия компонента, но не соответствует паттерну
+                addDebugLog(`⚠️ Строка похожа на компонент, но не распознана: ${line.substring(0, 120)}`, 'warning');
+            }
+        }
+    }
+    
+    // Добавляем последнего фигуриста
+    if (currentSkater && currentSkater.name) {
+        results.skaters.push(currentSkater);
+    }
+    
+    return results;
+}
+
+// Извлечение названия соревнования из ISU формата
+function extractISUCompetitionName(text) {
+    const patterns = [
+        /ISU\s+(?:Grand Prix|Junior Grand Prix|Championships|World Championships|European Championships|Four Continents Championships)[^0-9]+/i,
+        /([A-Z\s]+(?:Grand Prix|Championships)[^0-9]+)/i
+    ];
+    
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) {
+            return match[0].trim();
+        }
+    }
+    
+    return 'ISU Competition';
+}
+
 // Извлечение страны из строки
 function extractCountry(line) {
     const countryPattern = /(RUS|USA|CAN|JPN|CHN|KOR|FRA|ITA|GER|GBR|ESP|SWE|FIN|NOR|DEN|NED|BEL|AUT|SUI|CZE|POL|HUN|ROU|BUL|UKR|BLR|KAZ|UZB|GEO|ARM|AZE|ISR|AUS|NZL|BRA|ARG|MEX|RSA)/i;
@@ -1381,7 +2093,8 @@ function displayResults(data) {
                     <tr>
                         <td><strong>${element.name || (idx + 1)}</strong></td>
                         <td>${element.baseValue !== null && !isNaN(element.baseValue) ? element.baseValue.toFixed(2) : '-'}</td>
-                        <td>${element.goe !== null ? (element.goe >= 0 ? '+' : '') + element.goe.toFixed(2) : '-'}</td>
+                        <td>${(element.goe !== null && !isNaN(element.goe)) ? (element.goe >= 0 ? '+' : '') + element.goe.toFixed(2) : 
+                            ((element.GOE !== null && !isNaN(element.GOE)) ? (element.GOE >= 0 ? '+' : '') + element.GOE.toFixed(2) : '-')}</td>
                         <td>${judgeCells[0]}</td>
                         <td>${judgeCells[1]}</td>
                         <td>${judgeCells[2]}</td>
@@ -1472,7 +2185,9 @@ function displayStatistics(data) {
                 if (el.panelScore !== null && !isNaN(el.panelScore)) {
                     return sum + el.panelScore;
                 } else if (el.baseValue !== null && !isNaN(el.baseValue)) {
-                    const goe = (el.goe !== null && !isNaN(el.goe)) ? el.goe : 0;
+                    // Проверяем оба варианта: goe (ISU) и GOE (российский формат)
+                    const goe = (el.goe !== null && !isNaN(el.goe)) ? el.goe : 
+                                ((el.GOE !== null && !isNaN(el.GOE)) ? el.GOE : 0);
                     return sum + el.baseValue + goe;
                 }
                 return sum;
@@ -1945,11 +2660,11 @@ function displaySkaterInfo(skaterInfo) {
             </div>
             <div class="skater-stat-card">
                 <div class="skater-stat-label">Средний балл (элементы)</div>
-                <div class="skater-stat-value">${statistics.averagePanelScore.toFixed(2)}</div>
+                <div class="skater-stat-value">${statistics.averagePanelScore !== undefined && statistics.averagePanelScore !== null ? statistics.averagePanelScore.toFixed(2) : '0.00'}</div>
             </div>
             <div class="skater-stat-card">
                 <div class="skater-stat-label">Средний балл (компоненты)</div>
-                <div class="skater-stat-value">${statistics.averageComponentScore.toFixed(2)}</div>
+                <div class="skater-stat-value">${statistics.averageComponentScore !== undefined && statistics.averageComponentScore !== null ? statistics.averageComponentScore.toFixed(2) : '0.00'}</div>
             </div>
         </div>
         
@@ -1969,6 +2684,994 @@ function displaySkaterInfo(skaterInfo) {
 function closeSkaterInfo() {
     const infoDiv = document.getElementById('skaterInfo');
     infoDiv.style.display = 'none';
+}
+
+// Переменные для сравнения фигуристов
+let selectedSkater1 = null;
+let selectedSkater2 = null;
+
+// Инициализация поиска для сравнения
+// Глобальные переменные для обработчиков поиска
+let compareSearchTimeout1 = null;
+let compareSearchTimeout2 = null;
+let compareHandleSearch1 = null;
+let compareHandleSearch2 = null;
+
+// Функция для логирования в визуальную консоль
+function debugLog(message, type = 'info') {
+    const consoleContent = document.getElementById('debugConsoleContent');
+    if (!consoleContent) return;
+    
+    const timestamp = new Date().toLocaleTimeString('ru-RU');
+    const logEntry = document.createElement('div');
+    logEntry.className = `debug-log debug-${type}`;
+    logEntry.textContent = `[${timestamp}] ${message}`;
+    consoleContent.appendChild(logEntry);
+    consoleContent.scrollTop = consoleContent.scrollHeight;
+    
+    // Также логируем в обычную консоль
+    if (type === 'error') {
+        console.error(message);
+    } else if (type === 'success') {
+        console.log('✅', message);
+    } else {
+        console.log(message);
+    }
+}
+
+// Очистка визуальной консоли
+function clearDebugConsole() {
+    const consoleContent = document.getElementById('debugConsoleContent');
+    if (consoleContent) {
+        consoleContent.innerHTML = '<div class="debug-log">Консоль очищена</div>';
+    }
+}
+
+// Делаем функцию доступной глобально
+window.clearDebugConsole = clearDebugConsole;
+
+function initializeCompareSearch() {
+    debugLog('🟢 === Инициализация поиска для сравнения ===', 'info');
+    console.log('🟢 === Инициализация поиска для сравнения ===');
+    const skater1Input = document.getElementById('skater1Search');
+    const skater2Input = document.getElementById('skater2Search');
+    
+    debugLog(`Поиск элементов: skater1Input=${!!skater1Input}, skater2Input=${!!skater2Input}`, 'info');
+    console.log('🟢 Поиск элементов:', {
+        skater1Input: !!skater1Input,
+        skater2Input: !!skater2Input,
+        allInputs: document.querySelectorAll('input').length
+    });
+    
+    if (!skater1Input || !skater2Input) {
+        debugLog('❌ Поля поиска не найдены!', 'error');
+        console.error('❌ Поля поиска не найдены!', { 
+            skater1Input: !!skater1Input, 
+            skater2Input: !!skater2Input,
+            page: document.getElementById('comparePage') ? 'страница найдена' : 'страница НЕ найдена'
+        });
+        return;
+    }
+    
+    debugLog('✅ Элементы найдены, проверяем базу данных...', 'success');
+    // Проверяем наличие данных в базе при инициализации
+    checkDatabaseForSkaters();
+    
+    // Удаляем старые обработчики, если есть
+    if (compareHandleSearch1) {
+        skater1Input.removeEventListener('input', compareHandleSearch1);
+    }
+    if (compareHandleSearch2) {
+        skater2Input.removeEventListener('input', compareHandleSearch2);
+    }
+    
+    // Создаем новые обработчики
+    compareHandleSearch1 = (e) => {
+        clearTimeout(compareSearchTimeout1);
+        const query = e.target.value.trim();
+        
+        debugLog(`🔍 Поиск фигуриста 1: "${query}" (длина: ${query.length})`, 'info');
+        console.log('🔍 Поиск фигуриста 1:', query, 'длина:', query.length);
+        
+        if (query.length < 3) {
+            debugLog('⏸️ Запрос слишком короткий (минимум 3 символа), скрываем результаты', 'info');
+            console.log('🔍 Запрос слишком короткий, скрываем результаты');
+            hideCompareSearchResults('skater1Results');
+            return;
+        }
+        
+        debugLog('⏳ Запускаем поиск через 300мс...', 'info');
+        console.log('🔍 Запускаем поиск через 300мс...');
+        compareSearchTimeout1 = setTimeout(() => {
+            debugLog(`🔎 Выполняем поиск для фигуриста 1: "${query}"`, 'info');
+            console.log('🔍 Выполняем поиск для фигуриста 1:', query);
+            performCompareSearch(query, 'skater1');
+        }, 300);
+    };
+    
+    compareHandleSearch2 = (e) => {
+        clearTimeout(compareSearchTimeout2);
+        const query = e.target.value.trim();
+        
+        debugLog(`🔍 Поиск фигуриста 2: "${query}" (длина: ${query.length})`, 'info');
+        console.log('🔍 Поиск фигуриста 2:', query, 'длина:', query.length);
+        
+        if (query.length < 3) {
+            debugLog('⏸️ Запрос слишком короткий (минимум 3 символа), скрываем результаты', 'info');
+            console.log('🔍 Запрос слишком короткий, скрываем результаты');
+            hideCompareSearchResults('skater2Results');
+            return;
+        }
+        
+        debugLog('⏳ Запускаем поиск через 300мс...', 'info');
+        console.log('🔍 Запускаем поиск через 300мс...');
+        compareSearchTimeout2 = setTimeout(() => {
+            debugLog(`🔎 Выполняем поиск для фигуриста 2: "${query}"`, 'info');
+            console.log('🔍 Выполняем поиск для фигуриста 2:', query);
+            performCompareSearch(query, 'skater2');
+        }, 300);
+    };
+    
+    // Добавляем новые обработчики
+    skater1Input.addEventListener('input', compareHandleSearch1);
+    skater2Input.addEventListener('input', compareHandleSearch2);
+    
+    debugLog('✅ Обработчики событий привязаны к полям ввода', 'success');
+    console.log('🟢 Обработчики событий привязаны к полям ввода');
+    
+    // Тестируем, что обработчики работают
+    debugLog('Готов к поиску. Введите текст в поле поиска (минимум 3 символа)', 'info');
+    console.log('🟢 Тест: попробуйте ввести текст в поле поиска');
+    
+    // Если в полях уже есть текст, выполняем поиск сразу
+    if (skater1Input.value && skater1Input.value.trim().length >= 3) {
+        console.log('🟢 В поле 1 уже есть текст:', skater1Input.value.trim(), '- выполняем поиск');
+        setTimeout(() => {
+            performCompareSearch(skater1Input.value.trim(), 'skater1');
+        }, 500);
+    }
+    
+    if (skater2Input.value && skater2Input.value.trim().length >= 3) {
+        console.log('🟢 В поле 2 уже есть текст:', skater2Input.value.trim(), '- выполняем поиск');
+        setTimeout(() => {
+            performCompareSearch(skater2Input.value.trim(), 'skater2');
+        }, 500);
+    }
+    
+    console.log('=== Поиск для сравнения инициализирован ===');
+    console.log('Элементы найдены:', {
+        skater1Input: !!skater1Input,
+        skater2Input: !!skater2Input
+    });
+    console.log('Текущие значения:', {
+        value1: skater1Input.value,
+        value2: skater2Input.value
+    });
+    console.log('Обработчики привязаны:', {
+        handler1: !!compareHandleSearch1,
+        handler2: !!compareHandleSearch2
+    });
+    
+    // Тест: проверяем, что обработчики работают
+    console.log('Тест: попробуйте ввести текст в поле поиска и посмотрите сообщения в консоли');
+}
+
+// Проверка наличия фигуристов в базе данных
+async function checkDatabaseForSkaters() {
+    try {
+        debugLog('=== Начало проверки базы данных ===', 'info');
+        console.log('=== Начало проверки базы данных ===');
+        
+        let initFunc = null;
+        if (typeof initDatabase === 'function') {
+            initFunc = initDatabase;
+        } else if (typeof window.initDatabase === 'function') {
+            initFunc = window.initDatabase;
+        } else {
+            console.error('Функция initDatabase не найдена!');
+            return;
+        }
+        
+        await initFunc();
+        console.log('База данных инициализирована');
+        
+        let getAllFunction = null;
+        if (typeof getAllSkaters === 'function') {
+            getAllFunction = getAllSkaters;
+        } else if (typeof window.getAllSkaters === 'function') {
+            getAllFunction = window.getAllSkaters;
+        } else {
+            console.error('Функция getAllSkaters не найдена!');
+            return;
+        }
+        
+        const allSkaters = await getAllFunction();
+        debugLog(`=== Результаты проверки базы данных ===`, 'info');
+        debugLog(`Всего фигуристов: ${allSkaters.length}`, allSkaters.length > 0 ? 'success' : 'error');
+        if (allSkaters.length > 0) {
+            debugLog(`Имена: ${allSkaters.slice(0, 5).map(s => s.name).join(', ')}${allSkaters.length > 5 ? '...' : ''}`, 'info');
+        }
+        console.log('=== Результаты проверки базы данных ===');
+        console.log('Всего фигуристов:', allSkaters.length);
+        console.log('Имена фигуристов:', allSkaters.map(s => s.name));
+        
+        if (allSkaters.length === 0) {
+            debugLog('⚠️ База данных пуста! Загрузите PDF файлы и сохраните результаты.', 'error');
+            console.warn('⚠️ База данных пуста! Загрузите PDF файлы и сохраните результаты.');
+        } else {
+            debugLog(`✅ База данных содержит ${allSkaters.length} фигуристов`, 'success');
+            console.log('✅ База данных содержит данные');
+        }
+    } catch (error) {
+        debugLog(`❌ Ошибка проверки базы данных: ${error.message}`, 'error');
+        console.error('❌ Ошибка проверки базы данных:', error);
+    }
+}
+
+// Поиск для сравнения
+async function performCompareSearch(query, skaterNumber) {
+    try {
+        debugLog(`🔎 === Начало поиска фигуриста ${skaterNumber}: "${query}" ===`, 'info');
+        console.log(`🔎 === Начало поиска фигуриста ${skaterNumber}: "${query}" ===`);
+        
+        // Инициализируем базу данных
+        if (typeof initDatabase === 'function') {
+            await initDatabase();
+        } else if (typeof window.initDatabase === 'function') {
+            await window.initDatabase();
+        } else {
+            throw new Error('Функция initDatabase недоступна');
+        }
+        
+        // Используем функцию поиска
+        let searchFunction = null;
+        if (typeof searchSkaters === 'function') {
+            searchFunction = searchSkaters;
+        } else if (typeof window.searchSkaters === 'function') {
+            searchFunction = window.searchSkaters;
+        } else {
+            throw new Error('Функция searchSkaters недоступна. Проверьте, что database.js загружен.');
+        }
+        
+        debugLog('🔍 Выполняем поиск в базе данных...', 'info');
+        const results = await searchFunction(query);
+        debugLog(`✅ Найдено фигуристов: ${results.length}`, results.length > 0 ? 'success' : 'info');
+        console.log(`Найдено фигуристов: ${results.length}`, results);
+        
+        if (results.length === 0) {
+            // Проверяем, есть ли вообще фигуристы в базе
+            let allSkaters = [];
+            if (typeof getAllSkaters === 'function') {
+                allSkaters = await getAllSkaters();
+            } else if (typeof window.getAllSkaters === 'function') {
+                allSkaters = await window.getAllSkaters();
+            }
+            console.log(`Всего фигуристов в БД: ${allSkaters.length}`);
+            
+            if (allSkaters.length === 0) {
+                const resultsDiv = document.getElementById(`${skaterNumber}Results`);
+                if (resultsDiv) {
+                    resultsDiv.innerHTML = '<div class="search-result-item" style="color: orange;">База данных пуста. Загрузите PDF файлы и сохраните результаты.</div>';
+                    resultsDiv.classList.add('show');
+                }
+                return;
+            }
+        }
+        
+        displayCompareSearchResults(results, skaterNumber);
+    } catch (error) {
+        console.error('Ошибка поиска:', error);
+        hideCompareSearchResults(`${skaterNumber}Results`);
+        
+        // Показываем сообщение об ошибке
+        const resultsDiv = document.getElementById(`${skaterNumber}Results`);
+        if (resultsDiv) {
+            resultsDiv.innerHTML = `<div class="search-result-item" style="color: red;">Ошибка поиска: ${error.message}<br><small>Проверьте консоль (F12) для подробностей</small></div>`;
+            resultsDiv.classList.add('show');
+        }
+    }
+}
+
+// Отображение результатов поиска для сравнения
+function displayCompareSearchResults(skaters, skaterNumber) {
+    debugLog(`Отображение результатов поиска для фигуриста ${skaterNumber}: ${skaters ? skaters.length : 0} результатов`, 'info');
+    console.log('Отображение результатов поиска:', { skaters, skaterNumber });
+    // skaterNumber уже содержит "skater1" или "skater2", поэтому просто добавляем "Results"
+    const resultsId = `${skaterNumber}Results`;
+    const resultsDiv = document.getElementById(resultsId);
+    
+    if (!resultsDiv) {
+        debugLog(`❌ Элемент результатов не найден: ${resultsId}`, 'error');
+        console.error('Элемент результатов не найден:', resultsId);
+        return;
+    }
+    
+    if (!skaters || skaters.length === 0) {
+        debugLog('⏸️ Результаты пусты, показываем сообщение "Фигуристы не найдены"', 'info');
+        console.log('Результаты пусты, показываем сообщение');
+        resultsDiv.innerHTML = '<div class="search-result-item">Фигуристы не найдены</div>';
+        resultsDiv.style.display = 'block';
+        resultsDiv.classList.add('show');
+        return;
+    }
+    
+    debugLog(`✅ Отображаем ${skaters.length} результатов: ${skaters.map(s => s.name).join(', ')}`, 'success');
+    console.log(`Отображаем ${skaters.length} результатов`);
+    let html = '';
+    skaters.forEach(skater => {
+        html += `
+            <div class="search-result-item" onclick="selectSkaterForCompare(${skater.id}, '${skaterNumber}')">
+                <div class="search-result-name">${skater.name}</div>
+                <div class="search-result-meta">ID: ${skater.id}</div>
+            </div>
+        `;
+    });
+    
+    resultsDiv.innerHTML = html;
+    resultsDiv.style.display = 'block';
+    resultsDiv.classList.add('show');
+    debugLog(`✅ Результаты отображены в элементе ${resultsId}`, 'success');
+    console.log('Результаты отображены, элемент:', resultsDiv);
+}
+
+// Скрытие результатов поиска для сравнения
+function hideCompareSearchResults(resultsId) {
+    const resultsDiv = document.getElementById(resultsId);
+    if (resultsDiv) {
+        resultsDiv.classList.remove('show');
+        resultsDiv.style.display = 'none';
+    }
+}
+
+// Выбор фигуриста для сравнения
+async function selectSkaterForCompare(skaterId, skaterNumber) {
+    try {
+        await initDatabase();
+        const skaterInfo = await getSkaterFullInfo(skaterId);
+        
+        if (skaterNumber === 'skater1') {
+            selectedSkater1 = skaterInfo;
+            displaySelectedSkater(skaterInfo, 'skater1');
+        } else {
+            selectedSkater2 = skaterInfo;
+            displaySelectedSkater(skaterInfo, 'skater2');
+        }
+        
+        hideCompareSearchResults(`${skaterNumber}Results`);
+        document.getElementById(`${skaterNumber}Search`).value = '';
+        
+        // Если оба фигуриста выбраны, показываем сравнение
+        if (selectedSkater1 && selectedSkater2) {
+            performComparison();
+        }
+    } catch (error) {
+        console.error('Ошибка загрузки информации о фигуристе:', error);
+        alert('Ошибка при загрузке информации о фигуристе');
+    }
+}
+
+// Отображение выбранного фигуриста
+function displaySelectedSkater(skaterInfo, skaterNumber) {
+    const infoDiv = document.getElementById(`${skaterNumber}Info`);
+    const { skater, statistics } = skaterInfo;
+    
+    infoDiv.innerHTML = `
+        <div class="selected-skater-name">${skater.name}</div>
+        <div class="selected-skater-stats">
+            <div>Соревнований: <strong>${statistics.totalElements > 0 ? Math.round(statistics.totalElements / 7) : 0}</strong></div>
+            <div>Элементов: <strong>${statistics.totalElements}</strong></div>
+            <div>Средний балл: <strong>${statistics.averagePanelScore !== undefined && statistics.averagePanelScore !== null ? statistics.averagePanelScore.toFixed(2) : '0.00'}</strong></div>
+            <div>Средний компонент: <strong>${statistics.averageComponentScore !== undefined && statistics.averageComponentScore !== null ? statistics.averageComponentScore.toFixed(2) : '0.00'}</strong></div>
+        </div>
+        <button class="btn btn-danger btn-small" style="margin-top: 10px;" onclick="clearSkaterSelection('${skaterNumber}')">Очистить</button>
+    `;
+    
+    infoDiv.style.display = 'block';
+}
+
+// Очистка выбора фигуриста
+function clearSkaterSelection(skaterNumber) {
+    if (skaterNumber === 'skater1') {
+        selectedSkater1 = null;
+        document.getElementById('skater1Info').style.display = 'none';
+        document.getElementById('skater1Search').value = '';
+    } else {
+        selectedSkater2 = null;
+        document.getElementById('skater2Info').style.display = 'none';
+        document.getElementById('skater2Search').value = '';
+    }
+    
+    document.getElementById('compareResults').style.display = 'none';
+}
+
+// Выполнение сравнения
+function performComparison() {
+    if (!selectedSkater1 || !selectedSkater2) {
+        return;
+    }
+    
+    const resultsDiv = document.getElementById('compareResults');
+    
+    // Вычисляем статистику для сравнения
+    const stats1 = calculateComparisonStats(selectedSkater1);
+    const stats2 = calculateComparisonStats(selectedSkater2);
+    
+    // Создаем HTML для сравнения
+    let html = `
+        <div class="compare-header">
+            <h3>${selectedSkater1.skater.name} vs ${selectedSkater2.skater.name}</h3>
+        </div>
+        
+        <div class="compare-stats-grid">
+            ${createCompareStatCard('Всего соревнований', stats1.competitionsCount, stats2.competitionsCount, 'competitions')}
+            ${createCompareStatCard('Средний балл (элементы)', stats1.avgElementScore, stats2.avgElementScore, 'avgElement')}
+            ${createCompareStatCard('Средний балл (компоненты)', stats1.avgComponentScore, stats2.avgComponentScore, 'avgComponent')}
+            ${createCompareStatCard('Средняя сумма GOE', stats1.avgGOETotal, stats2.avgGOETotal, 'avgGOE')}
+            ${createCompareStatCard('Соотношение техника/компоненты', stats1.avgTechToComponentRatio, stats2.avgTechToComponentRatio, 'techToComponent')}
+            ${createCompareStatCard('Максимальный балл', stats1.maxScore, stats2.maxScore, 'maxScore')}
+            ${createCompareStatCard('Минимальный балл', stats1.minScore, stats2.minScore, 'minScore')}
+        </div>
+        
+        <h4 style="color: #1e3c72; margin: 30px 0 15px 0;">Сравнение по элементам</h4>
+        ${createElementsComparisonTable(selectedSkater1, selectedSkater2)}
+        
+        <h4 style="color: #1e3c72; margin: 30px 0 15px 0;">Сравнение по компонентам</h4>
+        ${createComponentsComparisonTable(selectedSkater1, selectedSkater2)}
+    `;
+    
+    resultsDiv.innerHTML = html;
+    resultsDiv.style.display = 'block';
+    
+    // Прокручиваем к результатам
+    resultsDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Вычисление статистики для сравнения
+function calculateComparisonStats(skaterInfo) {
+    const { competitions, statistics } = skaterInfo;
+    
+    // Собираем все оценки элементов
+    const allElementScores = [];
+    const allComponentScores = [];
+    const allTotalScores = [];
+    const allTechnicalTotals = []; // Общая техническая сумма (элементы) за каждое соревнование
+    const allComponentTotals = []; // Общая сумма компонентов за каждое соревнование
+    const allGOETotals = []; // Сумма GOE за каждое соревнование (техническая - базовая)
+    
+    competitions.forEach(comp => {
+        let technicalTotal = 0; // Сумма всех элементов за соревнование (panelScore)
+        let baseValueTotal = 0; // Сумма базовых стоимостей за соревнование
+        
+        comp.elements.forEach(el => {
+            if (el.panelScore !== null && !isNaN(el.panelScore)) {
+                allElementScores.push(el.panelScore);
+                technicalTotal += el.panelScore;
+            }
+            if (el.baseValue !== null && !isNaN(el.baseValue)) {
+                baseValueTotal += el.baseValue;
+            }
+        });
+        
+        // Сумма GOE = техническая сумма - базовая стоимость
+        const goeTotal = technicalTotal - baseValueTotal;
+        allGOETotals.push(goeTotal);
+        
+        let componentTotal = 0;
+        comp.components.forEach(comp => {
+            // Для среднего компонента используем averageScore (без фактора)
+            if (comp.averageScore !== null && !isNaN(comp.averageScore) && comp.averageScore > 0) {
+                allComponentScores.push(comp.averageScore);
+            }
+            // Для общей суммы компонентов используем averageScore * factor
+            const score = (comp.averageScore || 0) * (comp.factor || 0);
+            if (score > 0) {
+                componentTotal += score;
+            }
+        });
+        
+        allTechnicalTotals.push(technicalTotal);
+        allComponentTotals.push(componentTotal);
+        
+        // Общий балл за соревнование
+        const elementsTotal = comp.elements.reduce((sum, e) => sum + (e.panelScore || 0), 0);
+        const componentsTotal = comp.components.reduce((sum, c) => 
+            sum + ((c.averageScore || 0) * (c.factor || 0)), 0);
+        const total = elementsTotal + componentsTotal - (comp.deductions || 0);
+        if (total > 0) {
+            allTotalScores.push(total);
+        }
+    });
+    
+    // Средняя сумма GOE (рассчитывается для каждого соревнования отдельно)
+    const avgGOETotal = allGOETotals.length > 0
+        ? allGOETotals.reduce((a, b) => a + b, 0) / allGOETotals.length
+        : 0;
+    
+    // Среднее соотношение технической суммы к компонентам
+    const techToComponentRatios = [];
+    for (let i = 0; i < allTechnicalTotals.length && i < allComponentTotals.length; i++) {
+        if (allComponentTotals[i] > 0) {
+            techToComponentRatios.push(allTechnicalTotals[i] / allComponentTotals[i]);
+        }
+    }
+    const avgTechToComponentRatio = techToComponentRatios.length > 0
+        ? techToComponentRatios.reduce((a, b) => a + b, 0) / techToComponentRatios.length
+        : 0;
+    
+    return {
+        competitionsCount: competitions.length,
+        totalElements: statistics.totalElements,
+        avgElementScore: allElementScores.length > 0 
+            ? allElementScores.reduce((a, b) => a + b, 0) / allElementScores.length 
+            : 0,
+        avgComponentScore: allComponentScores.length > 0
+            ? allComponentScores.reduce((a, b) => a + b, 0) / allComponentScores.length
+            : 0, // Среднее из averageScore (без фактора), как в карточке фигуриста
+        maxScore: allTotalScores.length > 0 ? Math.max(...allTotalScores) : 0,
+        minScore: allTotalScores.length > 0 ? Math.min(...allTotalScores) : 0,
+        avgGOETotal: avgGOETotal, // Средняя сумма GOE (техническая - базовая)
+        avgTechToComponentRatio: avgTechToComponentRatio // Среднее соотношение технической суммы к компонентам
+    };
+}
+
+// Создание карточки сравнения статистики
+function createCompareStatCard(label, value1, value2, statType) {
+    const diff = value1 - value2;
+    const isEqual = Math.abs(diff) < 0.01;
+    const winner1 = diff > 0.01;
+    const winner2 = diff < -0.01;
+    
+    let diffClass = '';
+    let diffText = '';
+    if (isEqual) {
+        diffClass = 'equal';
+        diffText = 'Равны';
+    } else if (winner1) {
+        diffClass = 'positive';
+        diffText = `+${diff.toFixed(2)}`;
+    } else {
+        diffClass = 'negative';
+        diffText = diff.toFixed(2);
+    }
+    
+    const skater1Name = selectedSkater1 ? selectedSkater1.skater.name : 'Фигурист 1';
+    const skater2Name = selectedSkater2 ? selectedSkater2.skater.name : 'Фигурист 2';
+    
+    return `
+        <div class="compare-stat-card ${winner1 ? 'winner' : ''}">
+            <div class="compare-stat-label">${label}</div>
+            <div class="compare-stat-values">
+                <div class="compare-stat-value ${winner1 ? 'winner' : (winner2 ? 'loser' : '')}">
+                    <div class="compare-stat-value-name">${skater1Name}</div>
+                    <div class="compare-stat-value-number">${value1.toFixed(2)}</div>
+                </div>
+                <div class="compare-stat-value ${winner2 ? 'winner' : (winner1 ? 'loser' : '')}">
+                    <div class="compare-stat-value-name">${skater2Name}</div>
+                    <div class="compare-stat-value-number">${value2.toFixed(2)}</div>
+                </div>
+            </div>
+            <div class="compare-diff ${diffClass}">Разница: ${diffText}</div>
+        </div>
+    `;
+}
+
+// Создание таблицы сравнения элементов
+function createElementsComparisonTable(skater1, skater2) {
+    // Собираем все уникальные элементы с детальной информацией и позициями
+    const elements1 = {};
+    const elements2 = {};
+    
+    // Собираем информацию о позициях элементов в программах
+    const positions1 = {}; // {elementName: [позиции]}
+    const positions2 = {}; // {elementName: [позиции]}
+    
+    skater1.competitions.forEach(comp => {
+        comp.elements.forEach((el, index) => {
+            const position = index + 1; // Позиция элемента в программе (1, 2, 3...)
+            
+            if (!elements1[el.name]) {
+                elements1[el.name] = {
+                    scores: [],
+                    baseValues: [],
+                    goes: [],
+                    judgeScores: [],
+                    count: 0,
+                    positions: []
+                };
+                positions1[el.name] = [];
+            }
+            
+            if (el.panelScore !== null && !isNaN(el.panelScore)) {
+                elements1[el.name].scores.push(el.panelScore);
+                elements1[el.name].count++;
+                elements1[el.name].positions.push(position);
+                positions1[el.name].push(position);
+            }
+            if (el.baseValue !== null && !isNaN(el.baseValue)) {
+                elements1[el.name].baseValues.push(el.baseValue);
+            }
+            if (el.GOE !== null && !isNaN(el.GOE)) {
+                elements1[el.name].goes.push(el.GOE);
+            }
+            if (el.judgeScores && Array.isArray(el.judgeScores)) {
+                elements1[el.name].judgeScores.push(...el.judgeScores);
+            }
+        });
+    });
+    
+    skater2.competitions.forEach(comp => {
+        comp.elements.forEach((el, index) => {
+            const position = index + 1; // Позиция элемента в программе (1, 2, 3...)
+            
+            if (!elements2[el.name]) {
+                elements2[el.name] = {
+                    scores: [],
+                    baseValues: [],
+                    goes: [],
+                    judgeScores: [],
+                    count: 0,
+                    positions: []
+                };
+                positions2[el.name] = [];
+            }
+            
+            if (el.panelScore !== null && !isNaN(el.panelScore)) {
+                elements2[el.name].scores.push(el.panelScore);
+                elements2[el.name].count++;
+                elements2[el.name].positions.push(position);
+                positions2[el.name].push(position);
+            }
+            if (el.baseValue !== null && !isNaN(el.baseValue)) {
+                elements2[el.name].baseValues.push(el.baseValue);
+            }
+            if (el.GOE !== null && !isNaN(el.GOE)) {
+                elements2[el.name].goes.push(el.GOE);
+            }
+            if (el.judgeScores && Array.isArray(el.judgeScores)) {
+                elements2[el.name].judgeScores.push(...el.judgeScores);
+            }
+        });
+    });
+    
+    const allElements = new Set([...Object.keys(elements1), ...Object.keys(elements2)]);
+    const skater1Name = skater1.skater.name;
+    const skater2Name = skater2.skater.name;
+    
+    let html = `
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Элемент</th>
+                    <th>${skater1Name}</th>
+                    <th>${skater2Name}</th>
+                    <th>Разница</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+    
+    // Сначала создаем таблицу сравнения по позициям (1-й элемент vs 1-й элемент и т.д.)
+    html += `
+        <tr style="background: #e3f2fd; font-weight: bold;">
+            <td colspan="4" style="text-align: center; padding: 15px;">
+                Сравнение элементов по позициям в программе
+            </td>
+        </tr>
+    `;
+    
+    // Находим максимальное количество элементов в программе
+    let maxElements = 0;
+    skater1.competitions.forEach(comp => {
+        if (comp.elements.length > maxElements) maxElements = comp.elements.length;
+    });
+    skater2.competitions.forEach(comp => {
+        if (comp.elements.length > maxElements) maxElements = comp.elements.length;
+    });
+    
+    // Сравниваем элементы по позициям
+    for (let pos = 1; pos <= maxElements; pos++) {
+        // Находим элементы, которые выполнялись на позиции pos
+        const elementsAtPos1 = [];
+        const elementsAtPos2 = [];
+        
+        skater1.competitions.forEach(comp => {
+            if (comp.elements[pos - 1]) {
+                const el = comp.elements[pos - 1];
+                if (el.panelScore !== null && !isNaN(el.panelScore)) {
+                    elementsAtPos1.push({
+                        name: el.name,
+                        score: el.panelScore,
+                        baseValue: el.baseValue,
+                        GOE: el.GOE,
+                        judgeScores: el.judgeScores || []
+                    });
+                }
+            }
+        });
+        
+        skater2.competitions.forEach(comp => {
+            if (comp.elements[pos - 1]) {
+                const el = comp.elements[pos - 1];
+                if (el.panelScore !== null && !isNaN(el.panelScore)) {
+                    elementsAtPos2.push({
+                        name: el.name,
+                        score: el.panelScore,
+                        baseValue: el.baseValue,
+                        GOE: el.GOE,
+                        judgeScores: el.judgeScores || []
+                    });
+                }
+            }
+        });
+        
+        if (elementsAtPos1.length > 0 || elementsAtPos2.length > 0) {
+            // Средние значения для этой позиции
+            const avgScore1 = elementsAtPos1.length > 0 
+                ? elementsAtPos1.reduce((sum, e) => sum + e.score, 0) / elementsAtPos1.length 
+                : 0;
+            const avgScore2 = elementsAtPos2.length > 0 
+                ? elementsAtPos2.reduce((sum, e) => sum + e.score, 0) / elementsAtPos2.length 
+                : 0;
+            
+            // Находим наиболее частый элемент на этой позиции
+            let mostCommon1 = null;
+            if (elementsAtPos1.length > 0) {
+                const elementCount1 = {};
+                elementsAtPos1.forEach(e => {
+                    elementCount1[e.name] = (elementCount1[e.name] || 0) + 1;
+                });
+                const keys1 = Object.keys(elementCount1);
+                if (keys1.length > 0) {
+                    mostCommon1 = keys1.reduce((a, b) => 
+                        elementCount1[a] > elementCount1[b] ? a : b);
+                }
+            }
+            
+            let mostCommon2 = null;
+            if (elementsAtPos2.length > 0) {
+                const elementCount2 = {};
+                elementsAtPos2.forEach(e => {
+                    elementCount2[e.name] = (elementCount2[e.name] || 0) + 1;
+                });
+                const keys2 = Object.keys(elementCount2);
+                if (keys2.length > 0) {
+                    mostCommon2 = keys2.reduce((a, b) => 
+                        elementCount2[a] > elementCount2[b] ? a : b);
+                }
+            }
+            
+            const diff = avgScore1 - avgScore2;
+            let rowClass = '';
+            if (Math.abs(diff) < 0.01) {
+                rowClass = 'equal';
+            } else if (diff > 0.01) {
+                rowClass = 'better';
+            } else {
+                rowClass = 'worse';
+            }
+            
+            const info1 = elementsAtPos1.length > 0 ? `
+                <div style="font-size: 0.9em; line-height: 1.6;">
+                    <div><strong>${mostCommon1 || 'Разные'}</strong></div>
+                    <div><strong>Средняя оценка:</strong> ${avgScore1.toFixed(2)}</div>
+                    <div><strong>Выполнений:</strong> ${elementsAtPos1.length}</div>
+                </div>
+            ` : '<div style="color: #999;">Не выполнялся</div>';
+            
+            const info2 = elementsAtPos2.length > 0 ? `
+                <div style="font-size: 0.9em; line-height: 1.6;">
+                    <div><strong>${mostCommon2 || 'Разные'}</strong></div>
+                    <div><strong>Средняя оценка:</strong> ${avgScore2.toFixed(2)}</div>
+                    <div><strong>Выполнений:</strong> ${elementsAtPos2.length}</div>
+                </div>
+            ` : '<div style="color: #999;">Не выполнялся</div>';
+            
+            html += `
+                <tr class="${rowClass}">
+                    <td><strong>Позиция ${pos}</strong></td>
+                    <td>${info1}</td>
+                    <td>${info2}</td>
+                    <td style="font-weight: bold; font-size: 1.1em;">
+                        ${diff !== 0 ? (diff > 0 ? '<span style="color: #28a745;">+' : '<span style="color: #dc3545;">') + diff.toFixed(2) + '</span>' : '<span style="color: #6c757d;">0.00</span>'}
+                    </td>
+                </tr>
+            `;
+        }
+    }
+    
+    // Теперь создаем таблицу сравнения по типам элементов
+    html += `
+        <tr style="background: #fff3e0; font-weight: bold;">
+            <td colspan="4" style="text-align: center; padding: 15px;">
+                Сравнение элементов по типам
+            </td>
+        </tr>
+    `;
+    
+    Array.from(allElements).sort().forEach(elementName => {
+        const data1 = elements1[elementName] || { scores: [], baseValues: [], goes: [], judgeScores: [], count: 0, positions: [] };
+        const data2 = elements2[elementName] || { scores: [], baseValues: [], goes: [], judgeScores: [], count: 0, positions: [] };
+        
+        // Средние значения
+        const avg1 = data1.scores.length > 0 ? data1.scores.reduce((a, b) => a + b, 0) / data1.scores.length : 0;
+        const avg2 = data2.scores.length > 0 ? data2.scores.reduce((a, b) => a + b, 0) / data2.scores.length : 0;
+        const diff = avg1 - avg2;
+        
+        // Минимальные и максимальные значения
+        const min1 = data1.scores.length > 0 ? Math.min(...data1.scores) : 0;
+        const max1 = data1.scores.length > 0 ? Math.max(...data1.scores) : 0;
+        const min2 = data2.scores.length > 0 ? Math.min(...data2.scores) : 0;
+        const max2 = data2.scores.length > 0 ? Math.max(...data2.scores) : 0;
+        
+        // Средняя базовая стоимость
+        const avgBase1 = data1.baseValues.length > 0 ? data1.baseValues.reduce((a, b) => a + b, 0) / data1.baseValues.length : 0;
+        const avgBase2 = data2.baseValues.length > 0 ? data2.baseValues.reduce((a, b) => a + b, 0) / data2.baseValues.length : 0;
+        
+        // Средний GOE
+        const avgGOE1 = data1.goes.length > 0 ? data1.goes.reduce((a, b) => a + b, 0) / data1.goes.length : 0;
+        const avgGOE2 = data2.goes.length > 0 ? data2.goes.reduce((a, b) => a + b, 0) / data2.goes.length : 0;
+        
+        // Средняя оценка судей
+        const avgJudge1 = data1.judgeScores.length > 0 ? data1.judgeScores.reduce((a, b) => a + b, 0) / data1.judgeScores.length : 0;
+        const avgJudge2 = data2.judgeScores.length > 0 ? data2.judgeScores.reduce((a, b) => a + b, 0) / data2.judgeScores.length : 0;
+        
+        let rowClass = '';
+        if (Math.abs(diff) < 0.01) {
+            rowClass = 'equal';
+        } else if (diff > 0.01) {
+            rowClass = 'better';
+        } else {
+            rowClass = 'worse';
+        }
+        
+        // Определяем наиболее частые позиции
+        const posCount1 = {};
+        if (data1.positions && data1.positions.length > 0) {
+            data1.positions.forEach(pos => {
+                posCount1[pos] = (posCount1[pos] || 0) + 1;
+            });
+        }
+        const mostCommonPos1 = Object.keys(posCount1).length > 0 
+            ? Object.keys(posCount1).reduce((a, b) => posCount1[a] > posCount1[b] ? a : b)
+            : null;
+        const posText1 = mostCommonPos1 
+            ? `(чаще всего ${mostCommonPos1}-${mostCommonPos1 === '1' ? 'й' : mostCommonPos1 === '2' ? 'й' : mostCommonPos1 === '3' ? 'й' : 'й'})`
+            : '';
+        
+        const posCount2 = {};
+        if (data2.positions && data2.positions.length > 0) {
+            data2.positions.forEach(pos => {
+                posCount2[pos] = (posCount2[pos] || 0) + 1;
+            });
+        }
+        const mostCommonPos2 = Object.keys(posCount2).length > 0 
+            ? Object.keys(posCount2).reduce((a, b) => posCount2[a] > posCount2[b] ? a : b)
+            : null;
+        const posText2 = mostCommonPos2 
+            ? `(чаще всего ${mostCommonPos2}-${mostCommonPos2 === '1' ? 'й' : mostCommonPos2 === '2' ? 'й' : mostCommonPos2 === '3' ? 'й' : 'й'})`
+            : '';
+        
+        // Формируем детальную информацию для каждого фигуриста
+        const info1 = data1.count > 0 ? `
+            <div style="font-size: 0.9em; line-height: 1.6;">
+                <div><strong>Средняя оценка:</strong> ${avg1.toFixed(2)}</div>
+                <div><strong>Выполнений:</strong> ${data1.count} ${posText1}</div>
+                ${avgBase1 > 0 ? `<div><strong>Базовая:</strong> ${avgBase1.toFixed(2)}</div>` : ''}
+                ${avgGOE1 !== 0 ? `<div><strong>GOE:</strong> ${avgGOE1 > 0 ? '+' : ''}${avgGOE1.toFixed(2)}</div>` : ''}
+                ${data1.scores.length > 1 ? `<div><strong>Диапазон:</strong> ${min1.toFixed(2)} - ${max1.toFixed(2)}</div>` : ''}
+                ${avgJudge1 !== 0 ? `<div><strong>Средняя оценка судей:</strong> ${avgJudge1 > 0 ? '+' : ''}${avgJudge1.toFixed(2)}</div>` : ''}
+            </div>
+        ` : '<div style="color: #999;">Не выполнялся</div>';
+        
+        const info2 = data2.count > 0 ? `
+            <div style="font-size: 0.9em; line-height: 1.6;">
+                <div><strong>Средняя оценка:</strong> ${avg2.toFixed(2)}</div>
+                <div><strong>Выполнений:</strong> ${data2.count} ${posText2}</div>
+                ${avgBase2 > 0 ? `<div><strong>Базовая:</strong> ${avgBase2.toFixed(2)}</div>` : ''}
+                ${avgGOE2 !== 0 ? `<div><strong>GOE:</strong> ${avgGOE2 > 0 ? '+' : ''}${avgGOE2.toFixed(2)}</div>` : ''}
+                ${data2.scores.length > 1 ? `<div><strong>Диапазон:</strong> ${min2.toFixed(2)} - ${max2.toFixed(2)}</div>` : ''}
+                ${avgJudge2 !== 0 ? `<div><strong>Средняя оценка судей:</strong> ${avgJudge2 > 0 ? '+' : ''}${avgJudge2.toFixed(2)}</div>` : ''}
+            </div>
+        ` : '<div style="color: #999;">Не выполнялся</div>';
+        
+        html += `
+            <tr class="${rowClass}">
+                <td><strong>${elementName}</strong></td>
+                <td>${info1}</td>
+                <td>${info2}</td>
+                <td style="font-weight: bold; font-size: 1.1em;">
+                    ${diff !== 0 ? (diff > 0 ? '<span style="color: #28a745;">+' : '<span style="color: #dc3545;">') + diff.toFixed(2) + '</span>' : '<span style="color: #6c757d;">0.00</span>'}
+                </td>
+            </tr>
+        `;
+    });
+    
+    html += `
+            </tbody>
+        </table>
+    `;
+    
+    return html;
+}
+
+// Создание таблицы сравнения компонентов
+function createComponentsComparisonTable(skater1, skater2) {
+    const components1 = {};
+    const components2 = {};
+    
+    skater1.competitions.forEach(comp => {
+        comp.components.forEach(comp => {
+            if (!components1[comp.name]) {
+                components1[comp.name] = [];
+            }
+            const score = (comp.averageScore || 0) * (comp.factor || 0);
+            if (score > 0) {
+                components1[comp.name].push(score);
+            }
+        });
+    });
+    
+    skater2.competitions.forEach(comp => {
+        comp.components.forEach(comp => {
+            if (!components2[comp.name]) {
+                components2[comp.name] = [];
+            }
+            const score = (comp.averageScore || 0) * (comp.factor || 0);
+            if (score > 0) {
+                components2[comp.name].push(score);
+            }
+        });
+    });
+    
+    const allComponents = new Set([...Object.keys(components1), ...Object.keys(components2)]);
+    const skater1Name = skater1.skater.name;
+    const skater2Name = skater2.skater.name;
+    
+    let html = `
+        <table class="compare-table">
+            <thead>
+                <tr>
+                    <th>Компонент</th>
+                    <th>${skater1Name}</th>
+                    <th>${skater2Name}</th>
+                    <th>Разница</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+    
+    Array.from(allComponents).sort().forEach(componentName => {
+        const scores1 = components1[componentName] || [];
+        const scores2 = components2[componentName] || [];
+        const avg1 = scores1.length > 0 ? scores1.reduce((a, b) => a + b, 0) / scores1.length : 0;
+        const avg2 = scores2.length > 0 ? scores2.reduce((a, b) => a + b, 0) / scores2.length : 0;
+        const diff = avg1 - avg2;
+        
+        let rowClass = '';
+        if (Math.abs(diff) < 0.01) {
+            rowClass = 'equal';
+        } else if (diff > 0.01) {
+            rowClass = 'better';
+        } else {
+            rowClass = 'worse';
+        }
+        
+        html += `
+            <tr class="${rowClass}">
+                <td><strong>${componentName}</strong></td>
+                <td>${avg1 > 0 ? avg1.toFixed(2) : '-'} ${scores1.length > 0 ? `(${scores1.length})` : ''}</td>
+                <td>${avg2 > 0 ? avg2.toFixed(2) : '-'} ${scores2.length > 0 ? `(${scores2.length})` : ''}</td>
+                <td>${diff !== 0 ? (diff > 0 ? '+' : '') + diff.toFixed(2) : '0.00'}</td>
+            </tr>
+        `;
+    });
+    
+    html += `
+            </tbody>
+        </table>
+    `;
+    
+    return html;
 }
 
 // Сброс базы данных (обертка для вызова функции из database.js)
@@ -2000,5 +3703,180 @@ async function resetDatabaseWrapper() {
             alert('Ошибка при сбросе базы данных: ' + error.message);
         }
     }
+}
+
+// Функция для загрузки результатов ISU
+async function loadIsuResults() {
+    const isuUrlInput = document.getElementById('isuUrl');
+    const isuResultsInfo = document.getElementById('isuResultsInfo');
+    const isuResultsContent = document.getElementById('isuResultsContent');
+    const loadBtn = document.getElementById('loadIsuResultsBtn');
+    
+    if (!isuUrlInput || !isuResultsInfo || !isuResultsContent) {
+        return;
+    }
+    
+    const url = isuUrlInput.value.trim();
+    if (!url) {
+        alert('Пожалуйста, введите ссылку на результаты ISU');
+        return;
+    }
+    
+    // Проверяем, что это ссылка на isuresults.com
+    if (!url.includes('isuresults.com')) {
+        alert('Пожалуйста, введите ссылку на результаты с сайта isuresults.com');
+        return;
+    }
+    
+    try {
+        loadBtn.disabled = true;
+        loadBtn.textContent = 'Загрузка...';
+        isuResultsInfo.style.display = 'block';
+        isuResultsContent.innerHTML = '<div style="color: #666;">Загрузка результатов...</div>';
+        
+        // Используем CORS proxy для обхода ограничений CORS
+        // Можно использовать публичные прокси или попросить пользователя использовать расширение браузера
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+        
+        const response = await fetch(proxyUrl);
+        const data = await response.json();
+        
+        if (!data.contents) {
+            throw new Error('Не удалось загрузить страницу');
+        }
+        
+        // Парсим HTML
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(data.contents, 'text/html');
+        
+        // Ищем таблицу с результатами
+        // На странице ISU результаты обычно в таблице с классом или в определенной структуре
+        const skaters = [];
+        
+        // Пробуем найти таблицу с результатами
+        // Формат: Pl. Name Nation TSS= TES+ PCS+ CO PR SK Ded.- StN.
+        const tables = doc.querySelectorAll('table');
+        
+        for (const table of tables) {
+            const rows = table.querySelectorAll('tr');
+            
+            for (const row of rows) {
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 3) {
+                    // Первая ячейка - место (Pl.)
+                    const place = cells[0].textContent.trim();
+                    // Вторая ячейка - имя (может быть ссылкой)
+                    const nameCell = cells[1];
+                    const nameLink = nameCell.querySelector('a');
+                    const name = nameLink ? nameLink.textContent.trim() : nameCell.textContent.trim();
+                    // Третья ячейка - нация
+                    const nation = cells[2].textContent.trim();
+                    
+                    // Проверяем, что это валидная строка (место - число, имя не пустое)
+                    if (place && !isNaN(parseInt(place)) && name && name.length > 0) {
+                        skaters.push({
+                            place: parseInt(place),
+                            name: name,
+                            nation: nation
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Если не нашли в таблице, пробуем другой формат
+        if (skaters.length === 0) {
+            // Ищем все ссылки на биографии фигуристов
+            const bioLinks = doc.querySelectorAll('a[href*="/bios/isufs"]');
+            bioLinks.forEach((link, index) => {
+                const name = link.textContent.trim();
+                if (name && name.length > 0) {
+                    // Пытаемся найти место и нацию в родительской строке
+                    const row = link.closest('tr');
+                    if (row) {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 3) {
+                            const place = cells[0].textContent.trim();
+                            const nation = cells[2] ? cells[2].textContent.trim() : '';
+                            if (place && !isNaN(parseInt(place))) {
+                                skaters.push({
+                                    place: parseInt(place),
+                                    name: name,
+                                    nation: nation
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Сортируем по месту
+        skaters.sort((a, b) => a.place - b.place);
+        
+        // Получаем количество распознанных фигуристов из PDF
+        const parsedSkatersCount = results && results.skaters ? results.skaters.length : 0;
+        
+        // Формируем HTML для отображения
+        let html = `<div style="margin-bottom: 10px;"><strong>Найдено фигуристов на сайте ISU: ${skaters.length}</strong></div>`;
+        
+        if (parsedSkatersCount > 0) {
+            html += `<div style="margin-bottom: 10px;"><strong>Распознано из PDF: ${parsedSkatersCount}</strong></div>`;
+            
+            if (skaters.length !== parsedSkatersCount) {
+                html += `<div style="color: #dc3545; margin-bottom: 10px;">
+                    ⚠️ Количество не совпадает! Разница: ${Math.abs(skaters.length - parsedSkatersCount)}
+                </div>`;
+            } else {
+                html += `<div style="color: #28a745; margin-bottom: 10px;">
+                    ✓ Количество совпадает!
+                </div>`;
+            }
+        }
+        
+        if (skaters.length > 0) {
+            html += `<div style="margin-top: 15px;"><strong>Список фигуристов:</strong></div>`;
+            html += `<div style="max-height: 300px; overflow-y: auto; margin-top: 10px;">`;
+            html += `<table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">`;
+            html += `<tr style="background: #f0f0f0;"><th style="padding: 5px; text-align: left; border: 1px solid #ddd;">Место</th><th style="padding: 5px; text-align: left; border: 1px solid #ddd;">Имя</th><th style="padding: 5px; text-align: left; border: 1px solid #ddd;">Нация</th></tr>`;
+            
+            skaters.forEach(skater => {
+                // Проверяем, есть ли этот фигурист в распознанных
+                const isFound = results && results.skaters ? 
+                    results.skaters.some(s => s.name.toLowerCase().includes(skater.name.toLowerCase()) || 
+                                             skater.name.toLowerCase().includes(s.name.toLowerCase())) : false;
+                
+                const rowStyle = isFound ? 'background: #d4edda;' : 'background: #fff;';
+                html += `<tr style="${rowStyle}">
+                    <td style="padding: 5px; border: 1px solid #ddd;">${skater.place}</td>
+                    <td style="padding: 5px; border: 1px solid #ddd;">${skater.name}</td>
+                    <td style="padding: 5px; border: 1px solid #ddd;">${skater.nation}</td>
+                </tr>`;
+            });
+            
+            html += `</table></div>`;
+        } else {
+            html += `<div style="color: #dc3545; margin-top: 10px;">Не удалось найти фигуристов на странице. Возможно, формат страницы изменился.</div>`;
+        }
+        
+        isuResultsContent.innerHTML = html;
+        
+    } catch (error) {
+        console.error('Ошибка загрузки результатов ISU:', error);
+        isuResultsContent.innerHTML = `<div style="color: #dc3545;">
+            Ошибка загрузки результатов: ${error.message}<br>
+            <small style="color: #666;">Возможно, проблема с CORS. Попробуйте использовать расширение браузера для обхода CORS или скопируйте HTML страницы вручную.</small>
+        </div>`;
+    } finally {
+        loadBtn.disabled = false;
+        loadBtn.textContent = 'Загрузить';
+    }
+}
+
+// Делаем функции сравнения доступными глобально
+if (typeof window !== 'undefined') {
+    window.selectSkaterForCompare = selectSkaterForCompare;
+    window.clearSkaterSelection = clearSkaterSelection;
+    window.initializeCompareSearch = initializeCompareSearch;
 }
 

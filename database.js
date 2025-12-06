@@ -310,31 +310,61 @@ async function searchSkaters(searchQuery) {
     if (!db) await initDatabase();
     
     if (!searchQuery || searchQuery.length < 3) {
+        console.log('Поисковый запрос слишком короткий:', searchQuery);
         return [];
     }
     
     return new Promise((resolve, reject) => {
-        const transaction = db.transaction(['skaters'], 'readonly');
-        const request = transaction.objectStore('skaters').getAll();
-        
-        request.onsuccess = () => {
-            const allSkaters = request.result;
-            const query = searchQuery.toLowerCase().trim();
+        try {
+            const transaction = db.transaction(['skaters'], 'readonly');
+            const request = transaction.objectStore('skaters').getAll();
             
-            // Фильтруем фигуристов по имени (поиск в имени и фамилии)
-            const filtered = allSkaters.filter(skater => {
-                const name = skater.name.toLowerCase();
-                // Разбиваем имя на части (фамилия и имя)
-                const parts = name.split(/\s+/);
-                // Проверяем, начинается ли какая-то часть с запроса
-                return parts.some(part => part.startsWith(query));
-            });
+            request.onsuccess = () => {
+                const allSkaters = request.result;
+                console.log(`Всего фигуристов в БД: ${allSkaters.length}`);
+                console.log('Все имена фигуристов:', allSkaters.map(s => s.name));
+                
+                const query = searchQuery.toLowerCase().trim();
+                console.log('Ищем по запросу:', query);
+                
+                if (allSkaters.length === 0) {
+                    console.warn('База данных пуста!');
+                    resolve([]);
+                    return;
+                }
+                
+                // Фильтруем фигуристов по имени (поиск в имени и фамилии)
+                const filtered = allSkaters.filter(skater => {
+                    const name = skater.name.toLowerCase();
+                    // Разбиваем имя на части (фамилия и имя)
+                    const parts = name.split(/\s+/);
+                    // Проверяем, начинается ли какая-то часть с запроса ИЛИ содержит запрос
+                    const matches = parts.some(part => {
+                        const startsWith = part.startsWith(query);
+                        const includes = part.includes(query);
+                        return startsWith || includes;
+                    });
+                    if (matches) {
+                        console.log('✓ Найден фигурист:', skater.name, 'части:', parts, 'запрос:', query);
+                    } else {
+                        console.log('✗ Не подходит:', skater.name, 'части:', parts);
+                    }
+                    return matches;
+                });
+                
+                console.log(`Найдено совпадений: ${filtered.length}`, filtered.map(f => f.name));
+                // Ограничиваем результат 10 записями
+                resolve(filtered.slice(0, 10));
+            };
             
-            // Ограничиваем результат 10 записями
-            resolve(filtered.slice(0, 10));
-        };
-        
-        request.onerror = () => reject(request.error);
+            request.onerror = () => {
+                console.error('Ошибка при поиске фигуристов:', request.error);
+                reject(request.error);
+            };
+        } catch (error) {
+            console.error('Ошибка в searchSkaters:', error);
+            reject(error);
+        }
     });
 }
 
@@ -604,15 +634,19 @@ async function getSkaterStatistics(skaterId) {
         request.onerror = () => reject(request.error);
     });
     
+    // Рассчитываем средний компонент только из валидных значений
+    const validComponents = components.filter(c => c.averageScore !== null && c.averageScore !== undefined && !isNaN(c.averageScore) && c.averageScore > 0);
+    const averageComponentScore = validComponents.length > 0
+        ? validComponents.reduce((sum, c) => sum + (c.averageScore || 0), 0) / validComponents.length
+        : 0;
+    
     return {
         totalElements: elements.length,
         totalComponents: components.length,
         averagePanelScore: elements.length > 0 
             ? elements.reduce((sum, e) => sum + (e.panelScore || 0), 0) / elements.length 
             : 0,
-        averageComponentScore: components.length > 0
-            ? components.reduce((sum, c) => sum + (c.averageScore || 0), 0) / components.length
-            : 0
+        averageComponentScore: averageComponentScore
     };
 }
 
@@ -702,6 +736,11 @@ if (typeof window !== 'undefined') {
     window.getSkaterStatistics = getSkaterStatistics;
     window.exportDatabase = exportDatabase;
     window.importDatabase = importDatabase;
+    
+    console.log('Функции базы данных загружены в window:', {
+        searchSkaters: typeof window.searchSkaters,
+        initDatabase: typeof window.initDatabase
+    });
 }
 
 // Экспорт функций
